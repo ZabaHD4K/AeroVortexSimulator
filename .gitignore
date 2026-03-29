@@ -25,3 +25,6 @@ Desktop.ini
 
 # ImGui state
 imgui.ini
+
+# Claude Code
+.claude/
