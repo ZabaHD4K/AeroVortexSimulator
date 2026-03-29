@@ -1,10 +1,28 @@
 #include "gui.h"
+#include "app.h"
 #include <imgui.h>
+#include <filesystem>
+#include <algorithm>
+#include <cstdio>
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 #include <commdlg.h>
+
+namespace fs = std::filesystem;
+
+static const char* supportedExts[] = {
+    ".stl", ".obj", ".fbx", ".ply", ".dae", ".3ds", ".gltf", ".glb"
+};
+
+static bool isSupportedModel(const std::string& ext) {
+    std::string lower = ext;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    for (auto& e : supportedExts)
+        if (lower == e) return true;
+    return false;
+}
 
 std::string openFileDialog() {
     char filename[MAX_PATH] = "";
@@ -15,64 +33,101 @@ std::string openFileDialog() {
     ofn.nMaxFile = MAX_PATH;
     ofn.lpstrTitle = "Load 3D Model";
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-
-    if (GetOpenFileNameA(&ofn))
-        return std::string(filename);
+    if (GetOpenFileNameA(&ofn)) return std::string(filename);
     return "";
 }
 
-void Gui::render(Renderer& renderer, Camera& cam, const Model* model) {
+void Gui::init(const std::string& modelsPath) {
+    modelsDir = modelsPath;
+    refreshModelLibrary();
+}
+
+void Gui::refreshModelLibrary() {
+    libraryModels.clear();
+    if (modelsDir.empty() || !fs::exists(modelsDir)) return;
+    for (auto& entry : fs::directory_iterator(modelsDir)) {
+        if (!entry.is_regular_file()) continue;
+        std::string ext = entry.path().extension().string();
+        if (!isSupportedModel(ext)) continue;
+        ModelEntry me;
+        me.name = entry.path().stem().string();
+        me.path = entry.path().string();
+        me.extension = ext;
+        me.sizeMB = (float)entry.file_size() / (1024.0f * 1024.0f);
+        libraryModels.push_back(me);
+    }
+    std::sort(libraryModels.begin(), libraryModels.end(),
+        [](const ModelEntry& a, const ModelEntry& b) { return a.name < b.name; });
+}
+
+void Gui::render(App& app) {
     ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_FirstUseEver);
 
-    ImGui::Begin("Aero3D Simulator");
+    ImGui::Begin("AeroVortex Simulator");
 
-    // ── Model ────────────────────────────────────
-    ImGui::SeparatorText("Model");
-
-    if (ImGui::Button("Load Model (.stl/.obj/...)", ImVec2(-1, 30)))
-        loadRequested = true;
-
-    if (model) {
-        ImGui::Text("Name: %s", model->name.c_str());
-        int totalVerts = 0, totalTris = 0;
-        for (auto& m : model->meshes) {
-            totalVerts += (int)m.vertices.size();
-            totalTris += (int)m.indices.size() / 3;
-        }
-        ImGui::Text("Meshes: %d", (int)model->meshes.size());
-        ImGui::Text("Vertices: %s", std::to_string(totalVerts).c_str());
-        ImGui::Text("Triangles: %s", std::to_string(totalTris).c_str());
-    } else {
-        ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "No model loaded");
+    // ── MODEL ────────────────────────────────────
+    if (app.model.has_value()) {
+        ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "%s", app.model->name.c_str());
     }
 
-    // ── Render settings ──────────────────────────
-    ImGui::SeparatorText("Render");
+    for (auto& entry : libraryModels) {
+        char label[256];
+        snprintf(label, sizeof(label), "%s", entry.name.c_str());
+        if (ImGui::Button(label, ImVec2(-1, 0))) {
+            selectedLibraryPath = entry.path;
+            libraryLoadRequested = true;
+        }
+    }
 
-    ImGui::ColorEdit3("Model Color", &renderer.modelColor.x);
-    ImGui::Checkbox("Wireframe", &renderer.wireframe);
-    ImGui::Checkbox("Show Grid", &renderer.showGrid);
-    ImGui::DragFloat3("Light Dir", &renderer.lightDir.x, 0.01f, -1.0f, 1.0f);
+    if (ImGui::Button("Browse...", ImVec2(-1, 0))) loadRequested = true;
 
-    // ── Camera ───────────────────────────────────
-    ImGui::SeparatorText("Camera");
+    ImGui::Spacing();
 
-    ImGui::Text("Distance: %.2f", cam.distance);
-    ImGui::Text("Yaw: %.1f  Pitch: %.1f", cam.yaw, cam.pitch);
-    if (ImGui::Button("Reset Camera"))
-        cam.reset();
+    // ── WIND TUNNEL ──────────────────────────────
+    if (!app.model.has_value()) {
+        ImGui::TextDisabled("Load a model first");
+    } else if (!app.simInitialized) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f, 0.7f, 0.2f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f, 0.85f, 0.3f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.05f, 0.5f, 0.15f, 1.0f));
+        if (ImGui::Button("START WIND TUNNEL", ImVec2(-1, 45)))
+            windStartRequested = true;
+        ImGui::PopStyleColor(3);
+    } else {
+        auto& p = app.lbm3dParams;
 
-    ImGui::SameLine();
-    if (ImGui::Button("Front")) { cam.yaw = 0; cam.pitch = 0; }
-    ImGui::SameLine();
-    if (ImGui::Button("Side"))  { cam.yaw = 90; cam.pitch = 0; }
-    ImGui::SameLine();
-    if (ImGui::Button("Top"))   { cam.yaw = 0; cam.pitch = 89; }
+        if (p.running) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.1f, 1.0f));
+            if (ImGui::Button("STOP", ImVec2(-1, 35))) p.running = false;
+            ImGui::PopStyleColor();
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.1f, 0.7f, 0.2f, 1.0f));
+            if (ImGui::Button("RESUME", ImVec2(-1, 35))) p.running = true;
+            ImGui::PopStyleColor();
+        }
 
-    // ── Info ─────────────────────────────────────
-    ImGui::SeparatorText("Info");
-    ImGui::Text("FPS: %.0f", ImGui::GetIO().Framerate);
+        ImGui::SliderFloat("Wind Speed", &p.inletVelocity, 0.01f, 0.1f, "%.3f");
+
+        // Wind direction selector
+        ImGui::Spacing();
+        ImGui::Text("Wind Direction:");
+        static const char* windLabels[] = {
+            "Front (+X)", "Back (-X)", "Right (+Z)", "Left (-Z)", "Top (+Y)", "Bottom (-Y)"
+        };
+        int currentDir = (int)p.windDir;
+        if (ImGui::Combo("##winddir", &currentDir, windLabels, 6)) {
+            p.windDir = (WindDirection)currentDir;
+            windDirChangeRequested = true;
+        }
+
+        ImGui::Spacing();
+        ImGui::Text("Step: %d  |  Cd: %.3f  Cl: %.3f",
+                     app.lbm3d.getStep(), app.aeroCoeffs.Cd, app.aeroCoeffs.Cl);
+    }
+
+    ImGui::Spacing();
+    ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "FPS: %.0f", ImGui::GetIO().Framerate);
 
     ImGui::End();
 }

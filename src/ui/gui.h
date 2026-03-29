@@ -1,18 +1,56 @@
 #pragma once
-#include "visualization/renderer.h"
-#include "visualization/camera.h"
-#include "geometry/mesh.h"
 #include <string>
+#include <vector>
+
+class App; // forward declaration
 
 class Gui {
 public:
-    void render(Renderer& renderer, Camera& cam, const Model* model);
+    void init(const std::string& modelsPath);
+    void render(App& app);
+
     bool wantsLoadModel() const { return loadRequested; }
     void clearLoadRequest() { loadRequested = false; }
 
+    bool wantsLoadFromLibrary() const { return libraryLoadRequested; }
+    void clearLibraryRequest() { libraryLoadRequested = false; }
+    const std::string& getLibrarySelection() const { return selectedLibraryPath; }
+
+    bool wantsLBMReset() const { return lbmResetRequested; }
+    void clearLBMReset() { lbmResetRequested = false; }
+
+    bool wantsSimInit() const { return simInitRequested; }
+    void clearSimInit() { simInitRequested = false; }
+
+    bool wantsSimReset() const { return simResetRequested; }
+    void clearSimReset() { simResetRequested = false; }
+
+    bool wantsWindStart() const { return windStartRequested; }
+    void clearWindStart() { windStartRequested = false; }
+
+    bool wantsWindDirChange() const { return windDirChangeRequested; }
+    void clearWindDirChange() { windDirChangeRequested = false; }
+
+    void refreshModelLibrary();
+
 private:
     bool loadRequested = false;
+    bool libraryLoadRequested = false;
+    bool lbmResetRequested = false;
+    bool simInitRequested = false;
+    bool simResetRequested = false;
+    bool windStartRequested = false;
+    bool windDirChangeRequested = false;
+    std::string selectedLibraryPath;
+
+    std::string modelsDir;
+    struct ModelEntry {
+        std::string name;
+        std::string path;
+        std::string extension;
+        float sizeMB;
+    };
+    std::vector<ModelEntry> libraryModels;
 };
 
-// Opens native Windows file dialog, returns path or empty string
 std::string openFileDialog();

@@ -1,12 +1,14 @@
 cmake_minimum_required(VERSION 3.24)
-project(aero3d_simulator LANGUAGES C CXX)
+project(aero3d_simulator LANGUAGES C CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
-# MSVC needs /EHsc for exception handling (required by Assimp)
+# MSVC needs /EHsc (only for C/CXX, not CUDA)
 if(MSVC)
-    add_compile_options(/EHsc)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/EHsc>)
 endif()
 
 include(FetchContent)
@@ -70,15 +72,31 @@ target_include_directories(imgui_lib PUBLIC
 )
 target_link_libraries(imgui_lib PUBLIC glfw glad)
 
-# ── Native File Dialog (simple implementation) ────────
-# We use Windows native dialog via Win32 API directly
+# ── LBM CUDA library ─────────────────────────────────
+add_library(lbm_cuda STATIC
+    src/core/lbm2d.cu
+    src/core/lbm3d.cu
+)
+target_include_directories(lbm_cuda PUBLIC src)
+set_target_properties(lbm_cuda PROPERTIES
+    CUDA_SEPARABLE_COMPILATION OFF
+    CUDA_ARCHITECTURES native
+)
+target_compile_options(lbm_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/EHsc>)
 
 # ── Main executable ───────────────────────────────────
 add_executable(aero3d_simulator
     src/main.cpp
     src/app.cpp
     src/geometry/model_loader.cpp
+    src/core/voxelizer.cpp
+    src/core/aero_forces.cpp
     src/visualization/renderer.cpp
+    src/visualization/field2d.cpp
+    src/visualization/streamlines.cpp
+    src/visualization/slice_plane.cpp
+    src/visualization/surface_pressure.cpp
+    src/visualization/particles.cpp
     src/ui/gui.cpp
 )
 
@@ -86,6 +104,7 @@ target_include_directories(aero3d_simulator PRIVATE
     src
     ${assimp_SOURCE_DIR}/include
     ${assimp_BINARY_DIR}/include
+    ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
 )
 
 target_link_libraries(aero3d_simulator PRIVATE
@@ -94,6 +113,7 @@ target_link_libraries(aero3d_simulator PRIVATE
     imgui_lib
     glm::glm
     assimp
+    lbm_cuda
     opengl32
     comdlg32
 )
