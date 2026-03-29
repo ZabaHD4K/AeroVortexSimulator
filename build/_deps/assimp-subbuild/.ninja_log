@@ -1,0 +1,21 @@
+# ninja log v7
+2	55	7964885944103819	assimp-populate-prefix/src/assimp-populate-stamp/assimp-populate-mkdir	c8f37ea1db81b021
+2	55	7964885944103819	C:/Users/aleja/Desktop/proyectospersonales/aero3d-simulator/AeroVortexSimulator/build/_deps/assimp-subbuild/assimp-populate-prefix/src/assimp-populate-stamp/assimp-populate-mkdir	c8f37ea1db81b021
+55	72562	7964886669125756	assimp-populate-prefix/src/assimp-populate-stamp/assimp-populate-download	3093d807b9fa7442
+55	72562	7964886669125756	C:/Users/aleja/Desktop/proyectospersonales/aero3d-simulator/AeroVortexSimulator/build/_deps/assimp-subbuild/assimp-populate-prefix/src/assimp-populate-stamp/assimp-populate-download	3093d807b9fa7442
+72562	72674	7964886669216655	assimp-populate-prefix/src/assimp-populate-stamp/assimp-populate-update	58a3ed88622b5ed0
+72562	72674	7964886669216655	C:/Users/aleja/Desktop/proyectospersonales/aero3d-simulator/AeroVortexSimulator/build/_deps/assimp-subbuild/assimp-populate-prefix/src/assimp-populate-stamp/assimp-populate-update	58a3ed88622b5ed0
+72674	72735	7964886670898353	assimp-populate-prefix/src/assimp-populate-stamp/assimp-populate-patch	44a6f8f6380657ee
+72674	72735	7964886670898353	C:/Users/aleja/Desktop/proyectospersonales/aero3d-simulator/AeroVortexSimulator/build/_deps/assimp-subbuild/assimp-populate-prefix/src/assimp-populate-stamp/assimp-populate-patch	44a6f8f6380657ee
+72735	72774	7964886671304993	assimp-populate-prefix/src/assimp-populate-stamp/assimp-populate-configure	7bbf2c78aa5143d0
+72735	72774	7964886671304993	C:/Users/aleja/Desktop/proyectospersonales/aero3d-simulator/AeroVortexSimulator/build/_deps/assimp-subbuild/assimp-populate-prefix/src/assimp-populate-stamp/assimp-populate-configure	7bbf2c78aa5143d0
+72775	72834	7964886671894210	assimp-populate-prefix/src/assimp-populate-stamp/assimp-populate-build	d7746ff943e56b9d
+72775	72834	7964886671894210	C:/Users/aleja/Desktop/proyectospersonales/aero3d-simulator/AeroVortexSimulator/build/_deps/assimp-subbuild/assimp-populate-prefix/src/assimp-populate-stamp/assimp-populate-build	d7746ff943e56b9d
+72835	72883	7964886672363710	assimp-populate-prefix/src/assimp-populate-stamp/assimp-populate-install	ebed92c160fe88b2
+72835	72883	7964886672363710	C:/Users/aleja/Desktop/proyectospersonales/aero3d-simulator/AeroVortexSimulator/build/_deps/assimp-subbuild/assimp-populate-prefix/src/assimp-populate-stamp/assimp-populate-install	ebed92c160fe88b2
+72884	72935	7964886672905605	assimp-populate-prefix/src/assimp-populate-stamp/assimp-populate-test	9ae3b557d6ef1c92
+72884	72935	7964886672905605	C:/Users/aleja/Desktop/proyectospersonales/aero3d-simulator/AeroVortexSimulator/build/_deps/assimp-subbuild/assimp-populate-prefix/src/assimp-populate-stamp/assimp-populate-test	9ae3b557d6ef1c92
+72936	72991	7964886673459338	CMakeFiles/assimp-populate-complete	35c90cfbb14f578f
+72936	72991	7964886673459338	assimp-populate-prefix/src/assimp-populate-stamp/assimp-populate-done	35c90cfbb14f578f
+72936	72991	7964886673459338	C:/Users/aleja/Desktop/proyectospersonales/aero3d-simulator/AeroVortexSimulator/build/_deps/assimp-subbuild/CMakeFiles/assimp-populate-complete	35c90cfbb14f578f
+72936	72991	7964886673459338	C:/Users/aleja/Desktop/proyectospersonales/aero3d-simulator/AeroVortexSimulator/build/_deps/assimp-subbuild/assimp-populate-prefix/src/assimp-populate-stamp/assimp-populate-done	35c90cfbb14f578f
