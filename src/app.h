@@ -6,6 +6,7 @@
 #include "visualization/slice_plane.h"
 #include "visualization/surface_pressure.h"
 #include "visualization/particles.h"
+#include "visualization/volume_renderer.h"
 #include "ui/gui.h"
 #include "geometry/mesh.h"
 #include "core/lbm3d.cuh"
@@ -44,6 +45,7 @@ public:
     bool showSurfacePressure = true;
     bool showParticles = false;
     bool showModel = true;
+    bool showVolume = false;
 
     // Slice plane config
     int sliceAxis = 0;   // 0=X, 1=Y, 2=Z
@@ -51,7 +53,10 @@ public:
     int sliceField = 0;  // 0=velocity, 1=pressure, 2=vorticity
 
     // Streamline config
-    int numStreamlines = 600;
+    int numStreamlines = 300;
+
+    // Volume rendering config
+    int volumeField = 0; // 0=velocity, 1=pressure, 2=vorticity
 
     // Simulation state
     bool simInitialized = false;
@@ -71,6 +76,7 @@ private:
     SlicePlaneRenderer slicePlane;
     SurfacePressureRenderer surfacePressure;
     ParticleRenderer particles;
+    VolumeRenderer volumeRenderer;
     LBM2D lbm2d;
     LBM3D lbm3d;
     std::optional<Model> model;

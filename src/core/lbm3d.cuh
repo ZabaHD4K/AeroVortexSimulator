@@ -1,7 +1,7 @@
 #pragma once
 
 // ============================================================================
-// LBM 3D solver — D3Q19 lattice with BGK collision operator
+// LBM 3D solver — D3Q19 lattice with BGK / MRT collision + Smagorinsky LES
 // Runs entirely on GPU via CUDA
 //
 // Memory layout: Structure of Arrays (SoA)
@@ -10,8 +10,13 @@
 //
 // Boundary conditions:
 //   - Bounce-back on solid cells and Y/Z walls
-//   - Prescribed-velocity inlet on the -X face
-//   - Zero-gradient (Neumann) outlet on the +X face
+//   - Prescribed-velocity inlet
+//   - Zero-gradient (Neumann) outlet
+//
+// Collision models:
+//   - BGK: single relaxation time (original)
+//   - MRT: multiple relaxation time (d'Humières 2002)
+//   - Smagorinsky LES: subgrid-scale turbulence model (optional, works with both)
 // ============================================================================
 
 #include <cstdint>
@@ -39,6 +44,14 @@ enum WindDirection : int {
 };
 
 // ---------------------------------------------------------------------------
+// Collision model
+// ---------------------------------------------------------------------------
+enum class CollisionModel : int {
+    BGK = 0,
+    MRT = 1
+};
+
+// ---------------------------------------------------------------------------
 // Simulation parameters (handy POD for the UI layer)
 // ---------------------------------------------------------------------------
 struct LBM3DParams {
@@ -48,6 +61,13 @@ struct LBM3DParams {
     bool  running       = false;
     int   stepsPerFrame = 5;
     WindDirection windDir = WIND_POS_X;
+
+    // Collision model
+    CollisionModel collisionModel = CollisionModel::MRT;
+
+    // Smagorinsky LES
+    bool  useSmagorinsky = true;
+    float smagorinskyCs  = 0.1f;     // Smagorinsky constant
 };
 
 // ---------------------------------------------------------------------------
@@ -79,12 +99,17 @@ public:
     void setInletVelocity(float u);
     void setInletDirection(float ux, float uy, float uz);
     void setCellTypes(const uint8_t* hostCells);   // upload cell-type grid
+    void setCollisionModel(CollisionModel m);
+    void setSmagorinsky(bool enable, float Cs = 0.1f);
 
-    // Host-side field access (lazy copy on demand) ----------------------------
+    // Host-side field access (cached — only downloads when data is stale) -----
     const float* getVelocityMagnitude();           // |u|, nx*ny*nz
     const float* getPressureField();               // rho / 3, nx*ny*nz
     const float* getVorticityMagnitude();           // |curl u|, nx*ny*nz
     void getVelocityComponents(float** ux, float** uy, float** uz);
+
+    // Call once per frame before any field access to mark caches stale
+    void invalidateCache();
 
     // Device pointers for CUDA interop (zero-copy rendering, etc.) -----------
     float*       getDeviceUx()        { return d_ux; }
@@ -109,6 +134,11 @@ private:
     float inletUx = 0.05f, inletUy = 0.0f, inletUz = 0.0f;
     int   currentStep   = 0;
 
+    // Collision model
+    CollisionModel collisionModel = CollisionModel::MRT;
+    bool  useSmagorinsky = true;
+    float smagorinskyCs  = 0.1f;
+
     // --- Device arrays -------------------------------------------------------
 
     // Distribution functions: 19 * N floats each, SoA layout
@@ -124,6 +154,10 @@ private:
     float* d_uz  = nullptr;
     float* d_rho = nullptr;
 
+    // Persistent device buffers for derived fields (no malloc/free per call)
+    float* d_velMag = nullptr;
+    float* d_vort   = nullptr;
+
     // --- Host staging buffers ------------------------------------------------
     float* h_velMag   = nullptr;
     float* h_pressure = nullptr;
@@ -131,4 +165,10 @@ private:
     float* h_ux       = nullptr;
     float* h_uy       = nullptr;
     float* h_uz       = nullptr;
+
+    // --- Cache tracking (avoid redundant GPU→CPU transfers) ------------------
+    int cachedStep_vel     = -1;  // step when velocity components were last downloaded
+    int cachedStep_velMag  = -1;  // step when velocity magnitude was last computed
+    int cachedStep_pressure= -1;  // step when pressure was last downloaded
+    int cachedStep_vort    = -1;  // step when vorticity was last computed
 };

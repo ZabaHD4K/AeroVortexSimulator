@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <cstdio>
+#include <cfloat>
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -62,7 +63,7 @@ void Gui::refreshModelLibrary() {
 
 void Gui::render(App& app) {
     ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(320, 0), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(340, 0), ImGuiCond_FirstUseEver);
 
     ImGui::Begin("AeroVortex Simulator");
 
@@ -83,6 +84,7 @@ void Gui::render(App& app) {
     if (ImGui::Button("Browse...", ImVec2(-1, 0))) loadRequested = true;
 
     ImGui::Spacing();
+    ImGui::Separator();
 
     // ── WIND TUNNEL ──────────────────────────────
     if (!app.model.has_value()) {
@@ -97,6 +99,7 @@ void Gui::render(App& app) {
     } else {
         auto& p = app.lbm3dParams;
 
+        // ── Simulation controls ──
         if (p.running) {
             ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.8f, 0.2f, 0.1f, 1.0f));
             if (ImGui::Button("STOP", ImVec2(-1, 35))) p.running = false;
@@ -108,8 +111,10 @@ void Gui::render(App& app) {
         }
 
         ImGui::SliderFloat("Wind Speed", &p.inletVelocity, 0.01f, 0.1f, "%.3f");
+        ImGui::SliderFloat("Tau", &p.tau, 0.51f, 2.0f, "%.3f");
+        ImGui::SliderInt("Steps/Frame", &p.stepsPerFrame, 1, 20);
 
-        // Wind direction selector
+        // Wind direction
         ImGui::Spacing();
         ImGui::Text("Wind Direction:");
         static const char* windLabels[] = {
@@ -121,12 +126,85 @@ void Gui::render(App& app) {
             windDirChangeRequested = true;
         }
 
+        // ── Physics ──
         ImGui::Spacing();
-        ImGui::Text("Step: %d  |  Cd: %.3f  Cl: %.3f",
-                     app.lbm3d.getStep(), app.aeroCoeffs.Cd, app.aeroCoeffs.Cl);
+        if (ImGui::CollapsingHeader("Physics")) {
+            static const char* collisionLabels[] = { "BGK", "MRT (TRT)" };
+            int cm = (int)p.collisionModel;
+            if (ImGui::Combo("Collision", &cm, collisionLabels, 2))
+                p.collisionModel = (CollisionModel)cm;
+
+            ImGui::Checkbox("Smagorinsky LES", &p.useSmagorinsky);
+            if (p.useSmagorinsky)
+                ImGui::SliderFloat("Cs", &p.smagorinskyCs, 0.05f, 0.3f, "%.2f");
+
+            float Re = reynoldsNumber(p.inletVelocity, (float)p.ny * 0.4f, p.tau);
+            ImGui::Text("Re ~ %.0f", Re);
+        }
+
+        // ── Visualization toggles ──
+        ImGui::Spacing();
+        if (ImGui::CollapsingHeader("Visualization", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Model", &app.showModel);
+            ImGui::Checkbox("Streamlines", &app.showStreamlines);
+            if (app.showStreamlines)
+                ImGui::SliderInt("Num Lines", &app.numStreamlines, 25, 1000);
+
+            ImGui::Checkbox("Slice Plane", &app.showSlicePlane);
+            if (app.showSlicePlane) {
+                static const char* axisLabels[] = { "X", "Y", "Z" };
+                ImGui::Combo("Axis", &app.sliceAxis, axisLabels, 3);
+                int maxIdx = (app.sliceAxis == 0) ? p.nx-1 : (app.sliceAxis == 1) ? p.ny-1 : p.nz-1;
+                ImGui::SliderInt("Slice", &app.sliceIndex, 0, maxIdx);
+                static const char* fieldLabels[] = { "Velocity", "Pressure", "Vorticity" };
+                ImGui::Combo("Field##slice", &app.sliceField, fieldLabels, 3);
+            }
+
+            ImGui::Checkbox("Surface Pressure", &app.showSurfacePressure);
+            ImGui::Checkbox("Particles", &app.showParticles);
+
+            ImGui::Checkbox("Volume Render", &app.showVolume);
+            if (app.showVolume) {
+                static const char* vfLabels[] = { "Velocity", "Pressure", "Vorticity" };
+                ImGui::Combo("Field##vol", &app.volumeField, vfLabels, 3);
+                ImGui::SliderFloat("Density", &app.volumeRenderer.densityScale, 1.0f, 50.0f);
+                ImGui::SliderFloat("Opacity##vol", &app.volumeRenderer.opacity, 0.1f, 1.0f);
+            }
+        }
+
+        // ── Aero coefficients ──
+        ImGui::Spacing();
+        ImGui::Text("Step: %d", app.lbm3d.getStep());
+        ImGui::Text("Cd: %.4f  Cl: %.4f  Cs: %.4f",
+                     app.aeroCoeffs.Cd, app.aeroCoeffs.Cl, app.aeroCoeffs.Cs);
+        ImGui::Text("Fx: %.4f  Fy: %.4f  Fz: %.4f",
+                     app.aeroCoeffs.Fx, app.aeroCoeffs.Fy, app.aeroCoeffs.Fz);
+
+        // ── Cd/Cl history plot ──
+        if (!app.cdHistory.empty()) {
+            ImGui::PlotLines("Cd", app.cdHistory.data(), (int)app.cdHistory.size(),
+                             0, nullptr, FLT_MAX, FLT_MAX, ImVec2(0, 40));
+            ImGui::PlotLines("Cl", app.clHistory.data(), (int)app.clHistory.size(),
+                             0, nullptr, FLT_MAX, FLT_MAX, ImVec2(0, 40));
+        }
+
+        // ── Export ──
+        ImGui::Spacing();
+        if (ImGui::CollapsingHeader("Export")) {
+            if (ImGui::Button("Screenshot (BMP)", ImVec2(-1, 0)))
+                screenshotRequested = true;
+            if (ImGui::Button("Export VTK (ParaView)", ImVec2(-1, 0)))
+                exportVTKRequested = true;
+            if (ImGui::Button("Export CSV (Cd/Cl)", ImVec2(-1, 0)))
+                exportCSVRequested = true;
+        }
+
+        if (ImGui::Button("Reset Simulation", ImVec2(-1, 0)))
+            simResetRequested = true;
     }
 
     ImGui::Spacing();
+    ImGui::Separator();
     ImGui::TextColored(ImVec4(0.4f, 0.4f, 0.4f, 1.0f), "FPS: %.0f", ImGui::GetIO().Framerate);
 
     ImGui::End();

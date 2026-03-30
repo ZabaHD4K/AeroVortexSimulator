@@ -4,6 +4,7 @@
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #include <iostream>
+#include <cstdio>
 #include "app.h"
 
 // Global app pointer for callbacks
@@ -49,7 +50,44 @@ int main() {
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 
-    io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 18.0f);
+    // Cross-platform font loading with fallback to ImGui default
+    {
+        bool fontLoaded = false;
+#ifdef _WIN32
+        const char* fonts[] = {
+            "C:\\Windows\\Fonts\\segoeui.ttf",
+            "C:\\Windows\\Fonts\\arial.ttf",
+            "C:\\Windows\\Fonts\\tahoma.ttf",
+            nullptr
+        };
+#elif defined(__APPLE__)
+        const char* fonts[] = {
+            "/System/Library/Fonts/SFNSText.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/Library/Fonts/Arial.ttf",
+            nullptr
+        };
+#else
+        const char* fonts[] = {
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            nullptr
+        };
+#endif
+        for (const char** f = fonts; *f; ++f) {
+            FILE* test = fopen(*f, "rb");
+            if (test) {
+                fclose(test);
+                io.Fonts->AddFontFromFileTTF(*f, 18.0f);
+                fontLoaded = true;
+                break;
+            }
+        }
+        if (!fontLoaded)
+            std::cout << "[Font] No system font found, using ImGui default" << std::endl;
+    }
 
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();

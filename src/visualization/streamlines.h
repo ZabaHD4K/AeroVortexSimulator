@@ -16,13 +16,15 @@ public:
     // maxSteps: max integration steps per line
     void generate(const float* ux, const float* uy, const float* uz,
                   int nx, int ny, int nz, const uint8_t* cellTypes,
-                  int numLines = 600, int maxSteps = 2000,
+                  int numLines = 300, int maxSteps = 4000,
                   WindDirection windDir = WIND_POS_X);
 
     // Render all streamlines
     // mvp: model-view-projection matrix
-    // Maps grid coordinates to [-1,1] normalized space matching the model viewer
-    void render(const glm::mat4& mvp, float maxVel);
+    // freeStreamVel: freestream velocity magnitude (for perturbation coloring)
+    void render(const glm::mat4& mvp, float freeStreamVel);
+
+    float getMaxPerturbation() const { return maxPerturbation; }
 
     int getLineCount() const { return lineCount; }
 
@@ -34,9 +36,11 @@ private:
 
     struct StreamVertex {
         glm::vec3 pos;
-        float velocity; // magnitude, for coloring
+        float velocity; // magnitude, for perturbation coloring
         float alpha;    // opacity (fades along the line)
     };
+
+    float maxPerturbation = 0.01f; // tracked during generate()
 
     // Segment offsets for GL_LINE_STRIP rendering (one per streamline)
     std::vector<int> lineOffsets; // start index

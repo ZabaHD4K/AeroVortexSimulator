@@ -97,6 +97,8 @@ add_executable(aero3d_simulator
     src/visualization/slice_plane.cpp
     src/visualization/surface_pressure.cpp
     src/visualization/particles.cpp
+    src/visualization/volume_renderer.cpp
+    src/export/data_export.cpp
     src/ui/gui.cpp
 )
 

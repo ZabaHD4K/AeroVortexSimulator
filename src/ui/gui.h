@@ -31,6 +31,15 @@ public:
     bool wantsWindDirChange() const { return windDirChangeRequested; }
     void clearWindDirChange() { windDirChangeRequested = false; }
 
+    bool wantsScreenshot() const { return screenshotRequested; }
+    void clearScreenshot() { screenshotRequested = false; }
+
+    bool wantsExportVTK() const { return exportVTKRequested; }
+    void clearExportVTK() { exportVTKRequested = false; }
+
+    bool wantsExportCSV() const { return exportCSVRequested; }
+    void clearExportCSV() { exportCSVRequested = false; }
+
     void refreshModelLibrary();
 
 private:
@@ -41,6 +50,9 @@ private:
     bool simResetRequested = false;
     bool windStartRequested = false;
     bool windDirChangeRequested = false;
+    bool screenshotRequested = false;
+    bool exportVTKRequested = false;
+    bool exportCSVRequested = false;
     std::string selectedLibraryPath;
 
     std::string modelsDir;

@@ -2,6 +2,7 @@
 #include "geometry/model_loader.h"
 #include "core/voxelizer.h"
 #include "core/aero_forces.h"
+#include "export/data_export.h"
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
 #include <imgui.h>
@@ -30,6 +31,7 @@ bool App::init(GLFWwindow* win) {
     if (!slicePlane.init())  { std::cerr << "[App] Failed to init slice plane\n"; return false; }
     if (!surfacePressure.init()) { std::cerr << "[App] Failed to init surface pressure\n"; return false; }
     if (!particles.init()) { std::cerr << "[App] Failed to init particles\n"; return false; }
+    if (!volumeRenderer.init()) { std::cerr << "[App] Failed to init volume renderer\n"; return false; }
 
     if (!lbm2d.init(lbm2dParams.nx, lbm2dParams.ny)) {
         std::cerr << "[App] Failed to init LBM2D\n"; return false;
@@ -47,6 +49,7 @@ void App::shutdown() {
     if (model) freeModelGPU(*model);
     if (simInitialized) lbm3d.shutdown();
     lbm2d.shutdown();
+    volumeRenderer.shutdown();
     particles.shutdown();
     surfacePressure.shutdown();
     slicePlane.shutdown();
@@ -109,6 +112,8 @@ void App::initSimulation() {
     lbm3d.setCellTypes(voxelGrid.data());
     lbm3d.setTau(lbm3dParams.tau);
     lbm3d.setInletVelocity(lbm3dParams.inletVelocity);
+    lbm3d.setCollisionModel(lbm3dParams.collisionModel);
+    lbm3d.setSmagorinsky(lbm3dParams.useSmagorinsky, lbm3dParams.smagorinskyCs);
 
     // Set 3-component inlet velocity based on wind direction
     float u = lbm3dParams.inletVelocity;
@@ -139,6 +144,8 @@ void App::updateSimulation(float dt) {
 
     lbm3d.setTau(lbm3dParams.tau);
     lbm3d.setInletVelocity(lbm3dParams.inletVelocity);
+    lbm3d.setCollisionModel(lbm3dParams.collisionModel);
+    lbm3d.setSmagorinsky(lbm3dParams.useSmagorinsky, lbm3dParams.smagorinskyCs);
     {
         float u = lbm3dParams.inletVelocity;
         float iux = 0, iuy = 0, iuz = 0;
@@ -154,7 +161,10 @@ void App::updateSimulation(float dt) {
     }
     lbm3d.stepMultiple(lbm3dParams.stepsPerFrame);
 
-    // Update particles
+    // Invalidate field caches after stepping — forces fresh download on next access
+    lbm3d.invalidateCache();
+
+    // Update particles (uses cached velocity components)
     if (showParticles) {
         float *ux, *uy, *uz;
         lbm3d.getVelocityComponents(&ux, &uy, &uz);
@@ -163,7 +173,7 @@ void App::updateSimulation(float dt) {
                          voxelGrid.data());
     }
 
-    // Calculate aero coefficients every 50 steps
+    // Calculate aero coefficients every 50 steps (uses cached pressure)
     if (lbm3d.getStep() % 50 == 0) {
         const float* pressure = lbm3d.getPressureField();
         aeroCoeffs = calculateAeroCoefficients(
@@ -173,7 +183,6 @@ void App::updateSimulation(float dt) {
 
         cdHistory.push_back(aeroCoeffs.Cd);
         clHistory.push_back(aeroCoeffs.Cl);
-        // Keep last 500 points
         if (cdHistory.size() > 500) {
             cdHistory.erase(cdHistory.begin());
             clHistory.erase(clHistory.begin());
@@ -189,21 +198,73 @@ void App::renderSimulation3D(float aspect) {
     int nx = lbm3dParams.nx, ny = lbm3dParams.ny, nz = lbm3dParams.nz;
 
     // Render model
-    if (model) {
+    if (showModel && model) {
         renderer.renderModel(*model, camera, aspect);
     }
 
-    // Render wind streamlines
     if (simInitialized) {
         float *ux, *uy, *uz;
         lbm3d.getVelocityComponents(&ux, &uy, &uz);
-        // Regenerate every 50 steps or if none exist
-        if (lbm3d.getStep() % 50 == 0 || streamlines.getLineCount() == 0) {
-            streamlines.generate(ux, uy, uz, nx, ny, nz,
-                                 voxelGrid.data(), numStreamlines, 2000,
-                                 lbm3dParams.windDir);
+
+        // Streamlines
+        if (showStreamlines) {
+            if (lbm3d.getStep() % 50 == 0 || streamlines.getLineCount() == 0) {
+                streamlines.generate(ux, uy, uz, nx, ny, nz,
+                                     voxelGrid.data(), numStreamlines, 4000,
+                                     lbm3dParams.windDir);
+            }
+            streamlines.render(mvp, lbm3dParams.inletVelocity);
         }
-        streamlines.render(mvp, lbm3dParams.inletVelocity * 1.5f);
+
+        // Slice plane
+        if (showSlicePlane) {
+            const float* sliceField3D = nullptr;
+            float sMin = 0, sMax = 0.1f;
+            if (sliceField == 0) {
+                sliceField3D = lbm3d.getVelocityMagnitude();
+                sMax = lbm3dParams.inletVelocity * 1.5f;
+            } else if (sliceField == 1) {
+                sliceField3D = lbm3d.getPressureField();
+                sMin = 0.33f - 0.01f; sMax = 0.33f + 0.01f;
+            } else {
+                sliceField3D = lbm3d.getVorticityMagnitude();
+                sMax = 0.05f;
+            }
+            slicePlane.render(sliceField3D, nx, ny, nz,
+                              (SliceAxis)sliceAxis, sliceIndex,
+                              mvp, sMin, sMax, voxelGrid.data());
+        }
+
+        // Surface pressure
+        if (showSurfacePressure && model) {
+            const float* pField = lbm3d.getPressureField();
+            surfacePressure.render(*model, pField, nx, ny, nz, domainScale,
+                                   mvp, camera.getPosition(),
+                                   0.33f - 0.01f, 0.33f + 0.01f);
+        }
+
+        // Volume rendering
+        if (showVolume) {
+            const float* volField = nullptr;
+            float vMin = 0, vMax = 0.1f;
+            if (volumeField == 0) {
+                volField = lbm3d.getVelocityMagnitude();
+                vMax = lbm3dParams.inletVelocity * 1.5f;
+            } else if (volumeField == 1) {
+                volField = lbm3d.getPressureField();
+                vMin = 0.33f - 0.01f; vMax = 0.33f + 0.01f;
+            } else {
+                volField = lbm3d.getVorticityMagnitude();
+                vMax = 0.05f;
+            }
+            volumeRenderer.uploadField(volField, nx, ny, nz);
+            volumeRenderer.render(view, proj, camera.getPosition(), vMin, vMax);
+        }
+
+        // Particles
+        if (showParticles) {
+            particles.render(mvp, lbm3dParams.inletVelocity * 1.5f);
+        }
     }
 
     // Grid floor
@@ -267,6 +328,38 @@ void App::update(float dt) {
             lbm3d.setCellTypes(voxelGrid.data());
             cdHistory.clear();
             clHistory.clear();
+        }
+    }
+    if (gui.wantsScreenshot()) {
+        gui.clearScreenshot();
+        int w, h;
+        glfwGetFramebufferSize(window, &w, &h);
+        std::string fname = DataExporter::generateFilename("screenshot", "bmp");
+        if (DataExporter::saveScreenshot(fname, w, h))
+            std::cout << "[Export] Screenshot saved: " << fname << std::endl;
+    }
+    if (gui.wantsExportVTK()) {
+        gui.clearExportVTK();
+        if (simInitialized) {
+            std::string fname = DataExporter::generateFilename("field", "vts");
+            const float* velMag = lbm3d.getVelocityMagnitude();
+            const float* pres   = lbm3d.getPressureField();
+            const float* vort   = lbm3d.getVorticityMagnitude();
+            float *ux, *uy, *uz;
+            lbm3d.getVelocityComponents(&ux, &uy, &uz);
+            if (DataExporter::exportVTK(fname, velMag, pres, vort, ux, uy, uz,
+                                         voxelGrid.data(),
+                                         lbm3dParams.nx, lbm3dParams.ny, lbm3dParams.nz))
+                std::cout << "[Export] VTK saved: " << fname << std::endl;
+        }
+    }
+    if (gui.wantsExportCSV()) {
+        gui.clearExportCSV();
+        if (!cdHistory.empty()) {
+            std::string fname = DataExporter::generateFilename("coefficients", "csv");
+            if (DataExporter::exportCSV(fname, cdHistory, clHistory,
+                                         lbm3dParams.tau, lbm3dParams.inletVelocity))
+                std::cout << "[Export] CSV saved: " << fname << std::endl;
         }
     }
 

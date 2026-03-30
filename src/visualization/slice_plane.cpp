@@ -53,6 +53,8 @@ vec3 viridis(float t) {
 
 void main() {
     float val = texture(uField, vUV).r;
+    // Discard solid cells (sentinel value)
+    if (val < -1e20) discard;
     float range = uMaxVal - uMinVal;
     float t = (range > 1e-8) ? clamp((val - uMinVal) / range, 0.0, 1.0) : 0.5;
     vec3 color = viridis(t);
@@ -142,7 +144,8 @@ void SlicePlaneRenderer::shutdown() {
 void SlicePlaneRenderer::render(
     const float* field3D, int nx, int ny, int nz,
     SliceAxis axis, int sliceIndex,
-    const glm::mat4& mvp, float minVal, float maxVal)
+    const glm::mat4& mvp, float minVal, float maxVal,
+    const uint8_t* cellTypes)
 {
     if (!field3D) return;
 
@@ -165,7 +168,8 @@ void SlicePlaneRenderer::render(
             break;
     }
 
-    // Extract 2D slice
+    // Extract 2D slice (mark solid cells with sentinel value)
+    const float SENTINEL = -1e30f;
     std::vector<float> sliceData(w * h);
     for (int j = 0; j < h; j++) {
         for (int i = 0; i < w; i++) {
@@ -175,7 +179,13 @@ void SlicePlaneRenderer::render(
                 case SLICE_Y: x = i; y = sliceIndex; z = j; break;
                 case SLICE_Z: x = i; y = j; z = sliceIndex; break;
             }
-            sliceData[j * w + i] = field3D[z * nx * ny + y * nx + x];
+            int cellIdx = z * nx * ny + y * nx + x;
+            // If cell is solid, use sentinel so shader can discard it
+            if (cellTypes && cellTypes[cellIdx] == 1) {
+                sliceData[j * w + i] = SENTINEL;
+            } else {
+                sliceData[j * w + i] = field3D[cellIdx];
+            }
         }
     }
 
