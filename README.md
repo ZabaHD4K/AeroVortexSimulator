@@ -2,6 +2,15 @@
 
 Real-time 3D Computational Fluid Dynamics (CFD) simulator with GPU-accelerated Lattice Boltzmann Method (LBM) and interactive visualization. Load any 3D model, voxelize it, and watch the wind flow around it in real time.
 
+---
+
+## Demo
+
+<!-- TODO: Replace this placeholder with a GIF/video of the simulator in action -->
+> **Demo GIF coming soon** — a short clip of the wind tunnel simulation will be added here.
+
+---
+
 > **Proyecto de aprendizaje e ingenieria.** El objetivo es implementar desde cero los fundamentos de CFD, computacion GPU con CUDA, y visualizacion cientifica 3D. No reemplaza herramientas profesionales como ANSYS u OpenFOAM, pero implementa los mismos metodos numericos subyacentes.
 
 ---
