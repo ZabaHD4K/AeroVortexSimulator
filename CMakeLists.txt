@@ -89,6 +89,7 @@ add_executable(aero3d_simulator
     src/main.cpp
     src/app.cpp
     src/geometry/model_loader.cpp
+    src/geometry/primitives.cpp
     src/core/voxelizer.cpp
     src/core/aero_forces.cpp
     src/visualization/renderer.cpp

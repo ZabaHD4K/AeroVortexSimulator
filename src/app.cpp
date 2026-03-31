@@ -1,7 +1,7 @@
 #include "app.h"
 #include "geometry/model_loader.h"
+#include "geometry/primitives.h"
 #include "core/voxelizer.h"
-#include "core/aero_forces.h"
 #include "export/data_export.h"
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
@@ -13,6 +13,7 @@
 #include <iostream>
 #include <filesystem>
 #include <algorithm>
+#include <set>
 
 namespace fs = std::filesystem;
 
@@ -102,6 +103,7 @@ void App::initSimulation() {
     VoxelGrid grid = voxelizeModel(*model, lbm3dParams.nx, lbm3dParams.ny, lbm3dParams.nz,
                                    domainScale, lbm3dParams.windDir);
     voxelGrid = grid.cells;
+    voxelSize = grid.voxelSize;
 
     // Init LBM3D
     if (simInitialized) lbm3d.shutdown();
@@ -114,9 +116,11 @@ void App::initSimulation() {
     lbm3d.setInletVelocity(lbm3dParams.inletVelocity);
     lbm3d.setCollisionModel(lbm3dParams.collisionModel);
     lbm3d.setSmagorinsky(lbm3dParams.useSmagorinsky, lbm3dParams.smagorinskyCs);
+    lbm3d.setWindDirection(lbm3dParams.windDir);
 
-    // Set 3-component inlet velocity based on wind direction
-    float u = lbm3dParams.inletVelocity;
+    // Initialize at ramp-start velocity (60%) to avoid impulse shock
+    // The ramp in updateSimulation() will bring it to 100% over 150 steps
+    float u = lbm3dParams.inletVelocity * 0.6f;
     float iux = 0, iuy = 0, iuz = 0;
     switch (lbm3dParams.windDir) {
         case WIND_POS_X: iux =  u; break;
@@ -127,7 +131,7 @@ void App::initSimulation() {
         case WIND_NEG_Y: iuy = -u; break;
     }
     lbm3d.setInletDirection(iux, iuy, iuz);
-    lbm3d.reset();  // re-init populations with correct cell types
+    lbm3d.reset();  // re-init populations at low velocity (matching ramp start)
 
     simInitialized = true;
     sliceIndex = lbm3dParams.nx / 2;
@@ -146,8 +150,17 @@ void App::updateSimulation(float dt) {
     lbm3d.setInletVelocity(lbm3dParams.inletVelocity);
     lbm3d.setCollisionModel(lbm3dParams.collisionModel);
     lbm3d.setSmagorinsky(lbm3dParams.useSmagorinsky, lbm3dParams.smagorinskyCs);
+    lbm3d.setWindDirection(lbm3dParams.windDir);
     {
-        float u = lbm3dParams.inletVelocity;
+        // Gradual ramp-up: over the first 300 steps, linearly increase velocity
+        // from 20% to 100%. Prevents the shock wave that destabilizes the solver.
+        int step = lbm3d.getStep();
+        float ramp = 1.0f;
+        if (step < 150) {
+            ramp = 0.6f + 0.4f * (float)step / 150.0f;
+        }
+
+        float u = lbm3dParams.inletVelocity * ramp;
         float iux = 0, iuy = 0, iuz = 0;
         switch (lbm3dParams.windDir) {
             case WIND_POS_X: iux =  u; break;
@@ -161,8 +174,23 @@ void App::updateSimulation(float dt) {
     }
     lbm3d.stepMultiple(lbm3dParams.stepsPerFrame);
 
+    // Read convergence metric (already computed at end of stepMultiple)
+    convergenceRMS = lbm3d.computeRMSChange();
+    converged = lbm3d.isConverged(1e-5f);
+
     // Invalidate field caches after stepping — forces fresh download on next access
     lbm3d.invalidateCache();
+
+    // Compute normalized inlet direction for coloring
+    glm::vec3 inletDir(0.0f);
+    switch (lbm3dParams.windDir) {
+        case WIND_POS_X: inletDir = glm::vec3( 1, 0, 0); break;
+        case WIND_NEG_X: inletDir = glm::vec3(-1, 0, 0); break;
+        case WIND_POS_Z: inletDir = glm::vec3( 0, 0, 1); break;
+        case WIND_NEG_Z: inletDir = glm::vec3( 0, 0,-1); break;
+        case WIND_POS_Y: inletDir = glm::vec3( 0, 1, 0); break;
+        case WIND_NEG_Y: inletDir = glm::vec3( 0,-1, 0); break;
+    }
 
     // Update particles (uses cached velocity components)
     if (showParticles) {
@@ -170,16 +198,49 @@ void App::updateSimulation(float dt) {
         lbm3d.getVelocityComponents(&ux, &uy, &uz);
         particles.update(dt, ux, uy, uz,
                          lbm3dParams.nx, lbm3dParams.ny, lbm3dParams.nz,
-                         voxelGrid.data());
+                         voxelGrid.data(), lbm3dParams.windDir, inletDir);
     }
 
-    // Calculate aero coefficients every 50 steps (uses cached pressure)
-    if (lbm3d.getStep() % 50 == 0) {
-        const float* pressure = lbm3d.getPressureField();
-        aeroCoeffs = calculateAeroCoefficients(
-            pressure, voxelGrid.data(),
-            lbm3dParams.nx, lbm3dParams.ny, lbm3dParams.nz,
-            lbm3dParams.inletVelocity, domainScale);
+    // Calculate aero coefficients every 50 steps via momentum exchange (GPU).
+    // Skip first 500 steps — flow needs partial development.
+    if (lbm3d.getStep() > 500 && lbm3d.getStep() % 50 == 0) {
+        // Momentum exchange gives accurate forces directly in lattice units
+        float rawFx = 0, rawFy = 0, rawFz = 0;
+        lbm3d.computeForces(rawFx, rawFy, rawFz);
+
+        // Frontal area from voxel grid (project solid onto YZ plane)
+        std::set<int> projected;
+        int nx_ = lbm3dParams.nx, ny_ = lbm3dParams.ny, nz_ = lbm3dParams.nz;
+        for (int z = 0; z < nz_; z++)
+            for (int y = 0; y < ny_; y++)
+                for (int x = 0; x < nx_; x++)
+                    if (voxelGrid[z * nx_ * ny_ + y * nx_ + x] == 1)
+                        projected.insert(y * nz_ + z);
+        float frontalArea = std::max((float)projected.size(), 1.0f);
+        float q = 0.5f * 1.0f * lbm3dParams.inletVelocity * lbm3dParams.inletVelocity;
+
+        AeroCoefficients raw;
+        raw.Fx = rawFx;
+        raw.Fy = rawFy;
+        raw.Fz = rawFz;
+        if (q > 1e-10f) {
+            raw.Cd = rawFx / (q * frontalArea);
+            raw.Cl = rawFy / (q * frontalArea);
+            raw.Cs = rawFz / (q * frontalArea);
+        }
+
+        // Exponential moving average (alpha=0.08) for stable display
+        const float alpha = 0.08f;
+        if (cdHistory.empty()) {
+            aeroCoeffs = raw;
+        } else {
+            aeroCoeffs.Cd = aeroCoeffs.Cd + alpha * (raw.Cd - aeroCoeffs.Cd);
+            aeroCoeffs.Cl = aeroCoeffs.Cl + alpha * (raw.Cl - aeroCoeffs.Cl);
+            aeroCoeffs.Cs = aeroCoeffs.Cs + alpha * (raw.Cs - aeroCoeffs.Cs);
+            aeroCoeffs.Fx = aeroCoeffs.Fx + alpha * (raw.Fx - aeroCoeffs.Fx);
+            aeroCoeffs.Fy = aeroCoeffs.Fy + alpha * (raw.Fy - aeroCoeffs.Fy);
+            aeroCoeffs.Fz = aeroCoeffs.Fz + alpha * (raw.Fz - aeroCoeffs.Fz);
+        }
 
         cdHistory.push_back(aeroCoeffs.Cd);
         clHistory.push_back(aeroCoeffs.Cl);
@@ -206,14 +267,25 @@ void App::renderSimulation3D(float aspect) {
         float *ux, *uy, *uz;
         lbm3d.getVelocityComponents(&ux, &uy, &uz);
 
+        // Compute inlet direction for coloring
+        glm::vec3 inletDir(0.0f);
+        switch (lbm3dParams.windDir) {
+            case WIND_POS_X: inletDir = glm::vec3( 1, 0, 0); break;
+            case WIND_NEG_X: inletDir = glm::vec3(-1, 0, 0); break;
+            case WIND_POS_Z: inletDir = glm::vec3( 0, 0, 1); break;
+            case WIND_NEG_Z: inletDir = glm::vec3( 0, 0,-1); break;
+            case WIND_POS_Y: inletDir = glm::vec3( 0, 1, 0); break;
+            case WIND_NEG_Y: inletDir = glm::vec3( 0,-1, 0); break;
+        }
+
         // Streamlines
         if (showStreamlines) {
             if (lbm3d.getStep() % 50 == 0 || streamlines.getLineCount() == 0) {
                 streamlines.generate(ux, uy, uz, nx, ny, nz,
                                      voxelGrid.data(), numStreamlines, 4000,
-                                     lbm3dParams.windDir);
+                                     lbm3dParams.windDir, voxelSize, inletDir);
             }
-            streamlines.render(mvp, lbm3dParams.inletVelocity);
+            streamlines.render(mvp);
         }
 
         // Slice plane
@@ -232,13 +304,13 @@ void App::renderSimulation3D(float aspect) {
             }
             slicePlane.render(sliceField3D, nx, ny, nz,
                               (SliceAxis)sliceAxis, sliceIndex,
-                              mvp, sMin, sMax, voxelGrid.data());
+                              mvp, sMin, sMax, voxelGrid.data(), voxelSize);
         }
 
         // Surface pressure
         if (showSurfacePressure && model) {
             const float* pField = lbm3d.getPressureField();
-            surfacePressure.render(*model, pField, nx, ny, nz, domainScale,
+            surfacePressure.render(*model, pField, nx, ny, nz, voxelSize,
                                    mvp, camera.getPosition(),
                                    0.33f - 0.01f, 0.33f + 0.01f);
         }
@@ -257,13 +329,13 @@ void App::renderSimulation3D(float aspect) {
                 volField = lbm3d.getVorticityMagnitude();
                 vMax = 0.05f;
             }
-            volumeRenderer.uploadField(volField, nx, ny, nz);
+            volumeRenderer.uploadField(volField, nx, ny, nz, voxelSize);
             volumeRenderer.render(view, proj, camera.getPosition(), vMin, vMax);
         }
 
         // Particles
         if (showParticles) {
-            particles.render(mvp, lbm3dParams.inletVelocity * 1.5f);
+            particles.render(mvp, lbm3dParams.inletVelocity * 1.5f, voxelSize);
         }
     }
 
@@ -330,6 +402,33 @@ void App::update(float dt) {
             clHistory.clear();
         }
     }
+
+    // Test model generation
+    auto loadTestModel = [&](Model&& newModel, ValidationRef ref) {
+        if (model) freeModelGPU(*model);
+        if (simInitialized) { lbm3d.shutdown(); simInitialized = false; }
+        model = std::move(newModel);
+        validationActive = true;
+        validationRef = ref;
+        camera.reset();
+        lbm3dParams.running = false;
+        cdHistory.clear();
+        clHistory.clear();
+        if (mode == AppMode::SIMULATION_3D) mode = AppMode::MODEL_VIEWER;
+        std::cout << "[App] Test model loaded: " << model->name << std::endl;
+    };
+    if (gui.wantsTestSphere()) {
+        gui.clearTestSphere();
+        loadTestModel(generateSphere(), getSphereRef());
+    }
+    if (gui.wantsTestCylinder()) {
+        gui.clearTestCylinder();
+        loadTestModel(generateCylinder(), getCylinderRef());
+    }
+    if (gui.wantsTestNACA()) {
+        gui.clearTestNACA();
+        loadTestModel(generateNACA0012(), getNACA0012Ref());
+    }
     if (gui.wantsScreenshot()) {
         gui.clearScreenshot();
         int w, h;
@@ -360,6 +459,102 @@ void App::update(float dt) {
             if (DataExporter::exportCSV(fname, cdHistory, clHistory,
                                          lbm3dParams.tau, lbm3dParams.inletVelocity))
                 std::cout << "[Export] CSV saved: " << fname << std::endl;
+        }
+    }
+    if (gui.wantsExportFlowCSV()) {
+        gui.clearExportFlowCSV();
+        if (simInitialized) {
+            std::string fname = DataExporter::generateFilename("flowfield", "csv");
+            const float* velMag = lbm3d.getVelocityMagnitude();
+            const float* pres   = lbm3d.getPressureField();
+            const float* vort   = lbm3d.getVorticityMagnitude();
+            float *ux, *uy, *uz;
+            lbm3d.getVelocityComponents(&ux, &uy, &uz);
+            if (DataExporter::exportFlowFieldCSV(fname, velMag, pres, vort, ux, uy, uz,
+                                                  voxelGrid.data(),
+                                                  lbm3dParams.nx, lbm3dParams.ny, lbm3dParams.nz,
+                                                  voxelSize))
+                std::cout << "[Export] Flow field CSV saved: " << fname << std::endl;
+        }
+    }
+    if (gui.wantsExportReport()) {
+        gui.clearExportReport();
+        if (simInitialized) {
+            std::string fname = DataExporter::generateFilename("report", "html");
+
+            // Build report data
+            SimReportData rd;
+            if (model) {
+                rd.modelName = model->name;
+                rd.boundingRadius = model->radius;
+                rd.numMeshes = (int)model->meshes.size();
+                for (auto& m : model->meshes) {
+                    rd.totalVertices += (int)m.vertices.size();
+                    rd.totalTriangles += (int)m.indices.size() / 3;
+                }
+            }
+
+            rd.nx = lbm3dParams.nx;
+            rd.ny = lbm3dParams.ny;
+            rd.nz = lbm3dParams.nz;
+            rd.domainScale = domainScale;
+            rd.voxelSize = voxelSize;
+
+            // Cell counts
+            for (auto c : voxelGrid) {
+                switch (c) {
+                    case 0: rd.fluidCells++;  break;
+                    case 1: rd.solidCells++;  break;
+                    case 2: rd.inletCells++;  break;
+                    case 3: rd.outletCells++; break;
+                }
+            }
+
+            rd.tau = lbm3dParams.tau;
+            rd.inletVelocity = lbm3dParams.inletVelocity;
+            rd.windDir = (int)lbm3dParams.windDir;
+            rd.collisionModel = (int)lbm3dParams.collisionModel;
+            rd.smagorinsky = lbm3dParams.useSmagorinsky;
+            rd.smagorinskyCs = lbm3dParams.smagorinskyCs;
+            rd.viscosity = (lbm3dParams.tau - 0.5f) / 3.0f;
+            rd.reynoldsNumber = reynoldsNumber(lbm3dParams.inletVelocity,
+                                                (float)lbm3dParams.ny * 0.4f,
+                                                lbm3dParams.tau);
+
+            rd.currentStep = lbm3d.getStep();
+            rd.stepsPerFrame = lbm3dParams.stepsPerFrame;
+
+            rd.Cd = aeroCoeffs.Cd;
+            rd.Cl = aeroCoeffs.Cl;
+            rd.Cs = aeroCoeffs.Cs;
+            rd.Fx = aeroCoeffs.Fx;
+            rd.Fy = aeroCoeffs.Fy;
+            rd.Fz = aeroCoeffs.Fz;
+
+            rd.cdHistory = cdHistory;
+            rd.clHistory = clHistory;
+
+            rd.validationActive = validationActive;
+            if (validationActive) {
+                rd.expectedCd = validationRef.expectedCd;
+                rd.expectedCl = validationRef.expectedCl;
+                rd.validationSource = validationRef.source;
+            }
+
+            // Compute flow field statistics
+            const float* velMag = lbm3d.getVelocityMagnitude();
+            const float* pres   = lbm3d.getPressureField();
+            const float* vort   = lbm3d.getVorticityMagnitude();
+            int N = lbm3dParams.nx * lbm3dParams.ny * lbm3dParams.nz;
+            DataExporter::computeFieldStats(velMag, voxelGrid.data(), N,
+                                            rd.velMin, rd.velMax, rd.velMean);
+            DataExporter::computeFieldStats(pres, voxelGrid.data(), N,
+                                            rd.presMin, rd.presMax, rd.presMean);
+            DataExporter::computeFieldStats(vort, voxelGrid.data(), N,
+                                            rd.vortMin, rd.vortMax, rd.vortMean);
+
+            if (DataExporter::exportReport(fname, rd))
+                std::cout << "[Export] Report saved: " << fname << std::endl;
         }
     }
 
@@ -426,6 +621,7 @@ void App::loadModelFromPath(const std::string& path) {
         if (model) freeModelGPU(*model);
         if (simInitialized) { lbm3d.shutdown(); simInitialized = false; }
         model = std::move(*newModel);
+        validationActive = false;
         camera.reset();
         lbm3dParams.running = false;
         cdHistory.clear();

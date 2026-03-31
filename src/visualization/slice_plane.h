@@ -15,7 +15,8 @@ public:
     void render(const float* field3D, int nx, int ny, int nz,
                 SliceAxis axis, int sliceIndex,
                 const glm::mat4& mvp, float minVal, float maxVal,
-                const uint8_t* cellTypes = nullptr);
+                const uint8_t* cellTypes = nullptr,
+                float voxelSize = 0.01f);
 
     SliceAxis axis = SLICE_X;
     int sliceIndex = 50;

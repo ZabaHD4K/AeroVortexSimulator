@@ -10,21 +10,15 @@ public:
     void shutdown();
 
     // Generate streamlines from velocity field
-    // ux,uy,uz: host arrays of size nx*ny*nz
-    // nx,ny,nz: grid dimensions
-    // numLines: how many streamlines to seed
-    // maxSteps: max integration steps per line
+    // inletDir: normalized freestream direction (for deviation coloring)
     void generate(const float* ux, const float* uy, const float* uz,
                   int nx, int ny, int nz, const uint8_t* cellTypes,
                   int numLines = 300, int maxSteps = 4000,
-                  WindDirection windDir = WIND_POS_X);
+                  WindDirection windDir = WIND_POS_X,
+                  float voxelSize = 0.01f,
+                  glm::vec3 inletDir = glm::vec3(1,0,0));
 
-    // Render all streamlines
-    // mvp: model-view-projection matrix
-    // freeStreamVel: freestream velocity magnitude (for perturbation coloring)
-    void render(const glm::mat4& mvp, float freeStreamVel);
-
-    float getMaxPerturbation() const { return maxPerturbation; }
+    void render(const glm::mat4& mvp);
 
     int getLineCount() const { return lineCount; }
 
@@ -36,15 +30,13 @@ private:
 
     struct StreamVertex {
         glm::vec3 pos;
-        float velocity; // magnitude, for perturbation coloring
-        float alpha;    // opacity (fades along the line)
+        float deviation; // angle deviation from freestream [0,1]
+        float alpha;     // opacity (fades along the line)
     };
 
-    float maxPerturbation = 0.01f; // tracked during generate()
-
     // Segment offsets for GL_LINE_STRIP rendering (one per streamline)
-    std::vector<int> lineOffsets; // start index
-    std::vector<int> lineLengths; // vertex count
+    std::vector<int> lineOffsets;
+    std::vector<int> lineLengths;
 
     // RK4 integration of velocity field
     glm::vec3 interpolateVelocity(const float* ux, const float* uy, const float* uz,

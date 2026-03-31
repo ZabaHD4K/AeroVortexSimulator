@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <iostream>
 
 // ============================================================================
 // Triangle-AABB intersection using the Separating Axis Theorem (SAT)
@@ -101,6 +102,15 @@ VoxelGrid voxelizeModel(const Model& model, int nx, int ny, int nz, float domain
     grid.nx = nx;
     grid.ny = ny;
     grid.nz = nz;
+
+    size_t gridBytes = (size_t)nx * ny * nz;
+    if (gridBytes > 500ULL * 1024 * 1024) {  // 500MB limit for host grid
+        std::cerr << "[Voxelizer] Grid too large: " << nx << "x" << ny << "x" << nz
+                  << " (" << gridBytes / (1024*1024) << " MB)" << std::endl;
+        // Return empty grid
+        return grid;
+    }
+
     grid.cells.resize(static_cast<size_t>(nx) * ny * nz, CELL_FLUID);
 
     // -----------------------------------------------------------------------

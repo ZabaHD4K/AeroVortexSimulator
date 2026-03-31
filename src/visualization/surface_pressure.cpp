@@ -116,12 +116,12 @@ static unsigned int compileShaderProgram(const char* vSrc, const char* fSrc) {
 
 // ── World-to-grid mapping (inverse of gridToWorld) ──
 
-static glm::vec3 worldToGrid(glm::vec3 wp, int nx, int ny, int nz) {
-    float maxDim = (float)std::max({nx, ny, nz});
+static glm::vec3 worldToGrid(glm::vec3 wp, int nx, int ny, int nz, float voxelSize) {
+    float invVoxel = 1.0f / voxelSize;
     return glm::vec3(
-        wp.x * (maxDim * 0.5f) + nx * 0.5f,
-        wp.y * (maxDim * 0.5f) + ny * 0.5f,
-        wp.z * (maxDim * 0.5f) + nz * 0.5f
+        wp.x * invVoxel + nx * 0.5f,
+        wp.y * invVoxel + ny * 0.5f,
+        wp.z * invVoxel + nz * 0.5f
     );
 }
 
@@ -185,7 +185,7 @@ void SurfacePressureRenderer::shutdown() {
 
 void SurfacePressureRenderer::render(
     const Model& model, const float* pressure,
-    int nx, int ny, int nz, float domainScale,
+    int nx, int ny, int nz, float voxelSize,
     const glm::mat4& mvp, const glm::vec3& camPos,
     float minP, float maxP)
 {
@@ -263,7 +263,7 @@ void SurfacePressureRenderer::render(
     for (const auto& mesh : model.meshes) {
         for (const auto& v : mesh.vertices) {
             // Model vertex positions are in world space (identity model matrix)
-            glm::vec3 gpos = worldToGrid(v.position, nx, ny, nz);
+            glm::vec3 gpos = worldToGrid(v.position, nx, ny, nz, voxelSize);
             vertexPressures[vertIdx++] = sampleField(pressure, nx, ny, nz, gpos);
         }
     }

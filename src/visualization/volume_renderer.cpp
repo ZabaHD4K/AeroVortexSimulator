@@ -191,12 +191,11 @@ static unsigned int compileShaderProgram(const char* vSrc, const char* fSrc) {
 
 // ── Grid-to-world (same convention as other renderers) ──
 
-static glm::vec3 gridToWorld(float gx, float gy, float gz, int nx, int ny, int nz) {
-    float maxDim = (float)std::max({nx, ny, nz});
+static glm::vec3 gridToWorld(float gx, float gy, float gz, int nx, int ny, int nz, float voxelSize) {
     return glm::vec3(
-        (gx - nx * 0.5f) / (maxDim * 0.5f),
-        (gy - ny * 0.5f) / (maxDim * 0.5f),
-        (gz - nz * 0.5f) / (maxDim * 0.5f)
+        (gx - nx * 0.5f) * voxelSize,
+        (gy - ny * 0.5f) * voxelSize,
+        (gz - nz * 0.5f) * voxelSize
     );
 }
 
@@ -266,14 +265,14 @@ void VolumeRenderer::shutdown() {
     shader = 0; VAO = 0; VBO = 0; EBO = 0; tex3D = 0;
 }
 
-void VolumeRenderer::uploadField(const float* data, int nx, int ny, int nz) {
+void VolumeRenderer::uploadField(const float* data, int nx, int ny, int nz, float voxelSize) {
     if (!data) return;
 
     texNx = nx; texNy = ny; texNz = nz;
 
     // Compute volume AABB in world space
-    boxMin = gridToWorld(0, 0, 0, nx, ny, nz);
-    boxMax = gridToWorld((float)nx, (float)ny, (float)nz, nx, ny, nz);
+    boxMin = gridToWorld(0, 0, 0, nx, ny, nz, voxelSize);
+    boxMax = gridToWorld((float)nx, (float)ny, (float)nz, nx, ny, nz, voxelSize);
 
     glBindTexture(GL_TEXTURE_3D, tex3D);
     // Data layout: idx = z * nx * ny + y * nx + x

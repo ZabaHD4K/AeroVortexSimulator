@@ -110,7 +110,10 @@ __global__ void collideStreamKernel(
     const uint8_t* __restrict__ cellType,
     int nx, int ny, int nz,
     float omega,            // 1 / tau
-    float inletUx, float inletUy, float inletUz)  // prescribed inlet velocity
+    float inletUx, float inletUy, float inletUz,  // prescribed inlet velocity
+    int outDx, int outDy, int outDz,  // outlet upstream offset
+    bool  useSmagorinsky,
+    float smag_cs2)         // Cs^2 for Smagorinsky
 {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -160,11 +163,15 @@ __global__ void collideStreamKernel(
     }
 
     // ------------------------------------------------------------------
-    // OUTLET cells: zero-gradient (copy from x-1 neighbour), then
-    // stream to neighbours.
+    // OUTLET cells: zero-gradient (copy from upstream neighbour), then
+    // stream to neighbours. Upstream direction is wind-direction-aware.
     // ------------------------------------------------------------------
     if (type == CELL_OUTLET) {
-        int src = (x > 0) ? (x - 1) + y * nx + z * nx * ny : idx;
+        int sx = x + outDx, sy = y + outDy, sz = z + outDz;
+        sx = max(0, min(nx - 1, sx));
+        sy = max(0, min(ny - 1, sy));
+        sz = max(0, min(nz - 1, sz));
+        int src = sx + sy * nx + sz * nx * ny;
         float fPost[19];
         for (int q = 0; q < 19; q++) {
             fPost[q] = fIn[q * N + src];
@@ -191,7 +198,7 @@ __global__ void collideStreamKernel(
     }
 
     // ------------------------------------------------------------------
-    // FLUID cells: BGK collision + streaming
+    // FLUID cells: BGK collision + streaming (with optional Smagorinsky)
     // ------------------------------------------------------------------
 
     // 1. Gather populations at this node
@@ -209,19 +216,66 @@ __global__ void collideStreamKernel(
         uy  += (float)c_ey[q] * fi[q];
         uz  += (float)c_ez[q] * fi[q];
     }
+
+    // Stability guard: if density is wildly off, reset to freestream equilibrium
+    if (rho < 0.3f || rho > 3.0f || isnan(rho) || isinf(rho)) {
+        // Write freestream equilibrium to output and skip collision
+        for (int q = 0; q < 19; q++) {
+            float fEq = feq(q, 1.0f, inletUx, inletUy, inletUz);
+            int nx_ = x + c_ex[q];
+            int ny_ = y + c_ey[q];
+            int nz_ = z + c_ez[q];
+            if (nx_ < 0 || nx_ >= nx || ny_ < 0 || ny_ >= ny || nz_ < 0 || nz_ >= nz) {
+                fOut[c_opp[q] * N + idx] = fEq;
+            } else {
+                int nbIdx = nx_ + ny_ * nx + nz_ * nx * ny;
+                uint8_t nbType = cellType[nbIdx];
+                if (nbType == CELL_SOLID || nbType == CELL_INLET) {
+                    fOut[c_opp[q] * N + idx] = fEq;
+                } else {
+                    fOut[q * N + nbIdx] = fEq;
+                }
+            }
+        }
+        return;
+    }
+
     float invRho = 1.0f / rho;
     ux *= invRho;
     uy *= invRho;
     uz *= invRho;
 
-    // 3. Collision (BGK relaxation)
+    // 3. Smagorinsky LES turbulence model (optional)
+    float omega_eff = omega;
+    if (useSmagorinsky) {
+        float Sxx = 0, Syy = 0, Szz = 0, Sxy = 0, Syz = 0, Sxz = 0;
+        for (int q = 0; q < 19; q++) {
+            float fneq = fi[q] - feq(q, rho, ux, uy, uz);
+            float cqx = (float)c_ex[q];
+            float cqy = (float)c_ey[q];
+            float cqz = (float)c_ez[q];
+            Sxx += fneq * cqx * cqx;
+            Syy += fneq * cqy * cqy;
+            Szz += fneq * cqz * cqz;
+            Sxy += fneq * cqx * cqy;
+            Syz += fneq * cqy * cqz;
+            Sxz += fneq * cqx * cqz;
+        }
+        float Smag2 = Sxx*Sxx + Syy*Syy + Szz*Szz + 2.0f*(Sxy*Sxy + Syz*Syz + Sxz*Sxz);
+        float Smag  = sqrtf(2.0f * Smag2);
+        float tau_base = 1.0f / omega;
+        float tau_eff = 0.5f * (tau_base + sqrtf(tau_base * tau_base + 18.0f * smag_cs2 * Smag * invRho));
+        omega_eff = 1.0f / tau_eff;
+    }
+
+    // 4. Collision (BGK relaxation with effective omega)
     float fPost[19];
     #pragma unroll
     for (int q = 0; q < 19; q++) {
-        fPost[q] = fi[q] + omega * (feq(q, rho, ux, uy, uz) - fi[q]);
+        fPost[q] = fi[q] + omega_eff * (feq(q, rho, ux, uy, uz) - fi[q]);
     }
 
-    // 4. Streaming: push each post-collision population to its neighbour.
+    // 5. Streaming: push each post-collision population to its neighbour.
     //    If the neighbour is solid or outside the domain, bounce-back.
     //    Do NOT push into INLET cells — inlet manages its own populations.
     #pragma unroll
@@ -307,6 +361,7 @@ __global__ void collideStreamMRTKernel(
     int nx, int ny, int nz,
     float omega,            // 1/tau (for viscous relaxation rates)
     float inletUx, float inletUy, float inletUz,
+    int outDx, int outDy, int outDz,  // outlet upstream offset
     bool  useSmagorinsky,
     float smag_cs2)         // Cs^2 for Smagorinsky
 {
@@ -346,7 +401,11 @@ __global__ void collideStreamMRTKernel(
     }
 
     if (type == CELL_OUTLET) {
-        int src = (x > 0) ? (x - 1) + y * nx + z * nx * ny : idx;
+        int sx = x + outDx, sy = y + outDy, sz = z + outDz;
+        sx = max(0, min(nx - 1, sx));
+        sy = max(0, min(ny - 1, sy));
+        sz = max(0, min(nz - 1, sz));
+        int src = sx + sy * nx + sz * nx * ny;
         float fPost[19];
         for (int q = 0; q < 19; q++)
             fPost[q] = fIn[q * N + src];
@@ -383,6 +442,28 @@ __global__ void collideStreamMRTKernel(
         uy  += (float)c_ey[q] * fi[q];
         uz  += (float)c_ez[q] * fi[q];
     }
+
+    // Stability guard: if density is wildly off, reset to freestream equilibrium
+    if (rho < 0.3f || rho > 3.0f || isnan(rho) || isinf(rho)) {
+        for (int q = 0; q < 19; q++) {
+            float fEq = feq(q, 1.0f, inletUx, inletUy, inletUz);
+            int nx_ = x + c_ex[q];
+            int ny_ = y + c_ey[q];
+            int nz_ = z + c_ez[q];
+            if (nx_ < 0 || nx_ >= nx || ny_ < 0 || ny_ >= ny || nz_ < 0 || nz_ >= nz) {
+                fOut[c_opp[q] * N + idx] = fEq;
+            } else {
+                int nbIdx = nx_ + ny_ * nx + nz_ * nx * ny;
+                if (cellType[nbIdx] == CELL_SOLID || cellType[nbIdx] == CELL_INLET) {
+                    fOut[c_opp[q] * N + idx] = fEq;
+                } else {
+                    fOut[q * N + nbIdx] = fEq;
+                }
+            }
+        }
+        return;
+    }
+
     float invRho = 1.0f / rho;
     ux *= invRho;
     uy *= invRho;
@@ -391,8 +472,6 @@ __global__ void collideStreamMRTKernel(
     // 3. Compute non-equilibrium stress tensor for Smagorinsky
     float omega_eff = omega;
     if (useSmagorinsky) {
-        // Compute the non-equilibrium part of the stress tensor
-        // Pi_ab = sum_q (f_q - f_eq_q) * c_qa * c_qb
         float Sxx = 0, Syy = 0, Szz = 0, Sxy = 0, Syz = 0, Sxz = 0;
         for (int q = 0; q < 19; q++) {
             float fneq = fi[q] - feq(q, rho, ux, uy, uz);
@@ -406,11 +485,9 @@ __global__ void collideStreamMRTKernel(
             Syz += fneq * cqy * cqz;
             Sxz += fneq * cqx * cqz;
         }
-        // |S| = sqrt(2 * S_ij * S_ij)
         float Smag2 = Sxx*Sxx + Syy*Syy + Szz*Szz + 2.0f*(Sxy*Sxy + Syz*Syz + Sxz*Sxz);
         float Smag  = sqrtf(2.0f * Smag2);
 
-        // tau_eff = 0.5 * (tau + sqrt(tau^2 + 18 * Cs^2 * |S| / rho))
         float tau_base = 1.0f / omega;
         float tau_eff = 0.5f * (tau_base + sqrtf(tau_base * tau_base + 18.0f * smag_cs2 * Smag * invRho));
         omega_eff = 1.0f / tau_eff;
@@ -517,6 +594,16 @@ __global__ void macroKernel(
         vy += (float)c_ey[q] * fq;
         vz += (float)c_ez[q] * fq;
     }
+
+    // Stability clamp: if density is unphysical, report safe defaults
+    if (r < 0.5f || r > 2.0f || isnan(r) || isinf(r)) {
+        rho[idx] = 1.0f;
+        ux[idx]  = 0.0f;
+        uy[idx]  = 0.0f;
+        uz[idx]  = 0.0f;
+        return;
+    }
+
     float invR = 1.0f / r;
     rho[idx] = r;
     ux[idx]  = vx * invR;
@@ -592,7 +679,106 @@ __global__ void velMagKernel(
 }
 
 // ============================================================================
-// 5. Equilibrium initialisation kernel
+// 5b. RMS velocity change kernel (convergence detection)
+// ============================================================================
+//
+// For each fluid cell, computes (ux-uxPrev)^2 + (uy-uyPrev)^2 + (uz-uzPrev)^2
+// and writes the result into a scratch buffer (d_velMag is reused).
+
+__global__ void rmsChangeKernel(
+    const float* __restrict__ ux,
+    const float* __restrict__ uy,
+    const float* __restrict__ uz,
+    const float* __restrict__ uxPrev,
+    const float* __restrict__ uyPrev,
+    const float* __restrict__ uzPrev,
+    const uint8_t* __restrict__ cellType,
+    float* __restrict__ scratch,
+    int N)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+
+    if (cellType[idx] == CELL_SOLID) {
+        scratch[idx] = 0.0f;
+        return;
+    }
+
+    float dux = ux[idx] - uxPrev[idx];
+    float duy = uy[idx] - uyPrev[idx];
+    float duz = uz[idx] - uzPrev[idx];
+    scratch[idx] = dux * dux + duy * duy + duz * duz;
+}
+
+// ============================================================================
+// 5. Momentum Exchange kernel — accurate force on solid body
+// ============================================================================
+//
+// For each fluid cell adjacent to a solid neighbour, compute the momentum
+// transferred via bounce-back:  F_link = (f_q + f_opp(q)) * e_q
+// where q points from fluid toward solid.
+// Accumulated with atomicAdd into a 3-float buffer (fx, fy, fz).
+// This is the standard Ladd/MEA method and is far more accurate than
+// integrating pressure on staircase boundaries.
+// ============================================================================
+
+__global__ void momentumExchangeKernel(
+    const float* __restrict__ f,
+    const uint8_t* __restrict__ cellType,
+    int nx, int ny, int nz,
+    float* __restrict__ forceBuf)  // [fx, fy, fz]
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int z = blockIdx.z * blockDim.z + threadIdx.z;
+    if (x >= nx || y >= ny || z >= nz) return;
+
+    int idx = x + y * nx + z * nx * ny;
+    int N   = nx * ny * nz;
+
+    // Only fluid cells can have boundary links
+    if (cellType[idx] != CELL_FLUID) return;
+
+    float lfx = 0.0f, lfy = 0.0f, lfz = 0.0f;
+    bool hasSolidNb = false;
+
+    for (int q = 1; q < 19; q++) {  // skip rest direction (q=0)
+        int nx_ = x + c_ex[q];
+        int ny_ = y + c_ey[q];
+        int nz_ = z + c_ez[q];
+
+        if (nx_ < 0 || nx_ >= nx || ny_ < 0 || ny_ >= ny || nz_ < 0 || nz_ >= nz) continue;
+
+        int nbIdx = nx_ + ny_ * nx + nz_ * nx * ny;
+        if (cellType[nbIdx] != CELL_SOLID) continue;
+
+        hasSolidNb = true;
+
+        // Momentum exchange: (f_q + f_opp(q)) * e_q
+        // f_q    = population heading from fluid toward solid (pre-bounce)
+        // f_opp  = population heading from solid toward fluid (was bounced back)
+        int qopp = c_opp[q];
+        float fq    = f[q    * N + idx];
+        float fqopp = f[qopp * N + idx];
+
+        float ex = (float)c_ex[q];
+        float ey = (float)c_ey[q];
+        float ez = (float)c_ez[q];
+
+        lfx += (fq + fqopp) * ex;
+        lfy += (fq + fqopp) * ey;
+        lfz += (fq + fqopp) * ez;
+    }
+
+    if (hasSolidNb) {
+        atomicAdd(&forceBuf[0], lfx);
+        atomicAdd(&forceBuf[1], lfy);
+        atomicAdd(&forceBuf[2], lfz);
+    }
+}
+
+// ============================================================================
+// 6. Equilibrium initialisation kernel
 // ============================================================================
 
 __global__ void initEquilibriumKernel(
@@ -613,7 +799,11 @@ __global__ void initEquilibriumKernel(
     float ux0  = 0.0f, uy0 = 0.0f, uz0 = 0.0f;
 
     uint8_t type = cellType[idx];
-    if (type == CELL_INLET) {
+    // Inlet/outlet cells get the prescribed velocity.
+    // Fluid cells get the same velocity so the initial field is uniform.
+    // The app initializes at ramp-start velocity (60%) to avoid impulse
+    // shock against the solid body. The ramp then brings it to 100%.
+    if (type == CELL_INLET || type == CELL_OUTLET || type == CELL_FLUID) {
         ux0 = inletUx_; uy0 = inletUy_; uz0 = inletUz_;
     }
 
@@ -642,6 +832,19 @@ bool LBM3D::init(int nx_, int ny_, int nz_)
     size_t fSz  = 19 * N * sizeof(float);
     size_t fldSz = N * sizeof(float);
 
+    // Check available GPU memory before allocating
+    size_t freeMem = 0, totalMem = 0;
+    cudaMemGetInfo(&freeMem, &totalMem);
+    // Need: 2 * 19 * N * 4 (distributions) + 10 * N * 4 (fields incl. prev velocity) + N (cellTypes)
+    size_t required = (2 * 19 * N + 10 * N) * sizeof(float) + N * sizeof(uint8_t);
+    if (required > freeMem * 0.9) {  // leave 10% headroom
+        fprintf(stderr, "[LBM3D] Not enough GPU memory: need %.1f MB, available %.1f MB\n",
+                required / (1024.0 * 1024.0), freeMem / (1024.0 * 1024.0));
+        return false;
+    }
+    fprintf(stdout, "[LBM3D] GPU memory: using %.1f MB of %.1f MB available\n",
+            required / (1024.0 * 1024.0), freeMem / (1024.0 * 1024.0));
+
     // Device distribution functions
     CUDA_CHECK_BOOL(cudaMalloc(&d_f,     fSz));
     CUDA_CHECK_BOOL(cudaMalloc(&d_fTemp, fSz));
@@ -656,9 +859,17 @@ bool LBM3D::init(int nx_, int ny_, int nz_)
     CUDA_CHECK_BOOL(cudaMalloc(&d_uz,  fldSz));
     CUDA_CHECK_BOOL(cudaMalloc(&d_rho, fldSz));
 
+    // Previous velocity buffers (convergence detection)
+    CUDA_CHECK_BOOL(cudaMalloc(&d_uxPrev, fldSz));
+    CUDA_CHECK_BOOL(cudaMalloc(&d_uyPrev, fldSz));
+    CUDA_CHECK_BOOL(cudaMalloc(&d_uzPrev, fldSz));
+
     // Persistent device buffers for derived fields
     CUDA_CHECK_BOOL(cudaMalloc(&d_velMag, fldSz));
     CUDA_CHECK_BOOL(cudaMalloc(&d_vort,   fldSz));
+
+    // Force buffer for momentum exchange (3 floats)
+    CUDA_CHECK_BOOL(cudaMalloc(&d_forceBuf, 3 * sizeof(float)));
 
     // Host staging buffers
     h_velMag   = new float[N];
@@ -713,8 +924,12 @@ void LBM3D::shutdown()
     cudaFree(d_uy);      d_uy      = nullptr;
     cudaFree(d_uz);      d_uz      = nullptr;
     cudaFree(d_rho);     d_rho     = nullptr;
+    cudaFree(d_uxPrev);  d_uxPrev  = nullptr;
+    cudaFree(d_uyPrev);  d_uyPrev  = nullptr;
+    cudaFree(d_uzPrev);  d_uzPrev  = nullptr;
     cudaFree(d_velMag);  d_velMag  = nullptr;
     cudaFree(d_vort);    d_vort    = nullptr;
+    cudaFree(d_forceBuf); d_forceBuf = nullptr;
 
     delete[] h_velMag;    h_velMag    = nullptr;
     delete[] h_pressure;  h_pressure  = nullptr;
@@ -767,16 +982,19 @@ void LBM3D::step()
               (nz + BLOCK - 1) / BLOCK);
 
     // Collide + stream: d_f -> d_fTemp
+    float smag_cs2 = smagorinskyCs * smagorinskyCs;
     if (collisionModel == CollisionModel::MRT) {
-        float smag_cs2 = smagorinskyCs * smagorinskyCs;
         collideStreamMRTKernel<<<grid, block>>>(d_f, d_fTemp, d_cellType,
                                                  nx, ny, nz, omega,
                                                  inletUx, inletUy, inletUz,
+                                                 outletDx, outletDy, outletDz,
                                                  useSmagorinsky, smag_cs2);
     } else {
         collideStreamKernel<<<grid, block>>>(d_f, d_fTemp, d_cellType,
                                               nx, ny, nz, omega,
-                                              inletUx, inletUy, inletUz);
+                                              inletUx, inletUy, inletUz,
+                                              outletDx, outletDy, outletDz,
+                                              useSmagorinsky, smag_cs2);
     }
     CUDA_CHECK(cudaGetLastError());
 
@@ -814,6 +1032,18 @@ void LBM3D::setInletDirection(float ux, float uy, float uz) {
     inletUx = ux; inletUy = uy; inletUz = uz;
 }
 void LBM3D::setCollisionModel(CollisionModel m) { collisionModel = m; }
+void LBM3D::setWindDirection(WindDirection dir) {
+    // Outlet upstream offset: opposite to the wind direction
+    outletDx = outletDy = outletDz = 0;
+    switch (dir) {
+        case WIND_POS_X: outletDx = -1; break;
+        case WIND_NEG_X: outletDx =  1; break;
+        case WIND_POS_Y: outletDy = -1; break;
+        case WIND_NEG_Y: outletDy =  1; break;
+        case WIND_POS_Z: outletDz = -1; break;
+        case WIND_NEG_Z: outletDz =  1; break;
+    }
+}
 void LBM3D::setSmagorinsky(bool enable, float Cs) {
     useSmagorinsky = enable;
     smagorinskyCs  = Cs;
@@ -913,4 +1143,74 @@ void LBM3D::getVelocityComponents(float** ux_out, float** uy_out, float** uz_out
     if (ux_out) *ux_out = h_ux;
     if (uy_out) *uy_out = h_uy;
     if (uz_out) *uz_out = h_uz;
+}
+
+// ---------------------------------------------------------------------------
+// computeRMSChange — convergence detection
+// Computes RMS velocity change between current and previous velocity fields.
+// Uses d_velMag as scratch space for the per-cell squared differences.
+// Downloads to CPU and sums (avoids thrust dependency).
+// ---------------------------------------------------------------------------
+float LBM3D::computeRMSChange()
+{
+    size_t N  = (size_t)nx * ny * nz;
+    size_t sz = N * sizeof(float);
+
+    // Launch kernel: compute per-cell squared velocity difference into d_velMag (scratch)
+    int threads = 256;
+    int blocks  = ((int)N + threads - 1) / threads;
+    rmsChangeKernel<<<blocks, threads>>>(d_ux, d_uy, d_uz,
+                                          d_uxPrev, d_uyPrev, d_uzPrev,
+                                          d_cellType, d_velMag, (int)N);
+
+    // Copy current velocity to prev buffers for next call
+    cudaMemcpy(d_uxPrev, d_ux, sz, cudaMemcpyDeviceToDevice);
+    cudaMemcpy(d_uyPrev, d_uy, sz, cudaMemcpyDeviceToDevice);
+    cudaMemcpy(d_uzPrev, d_uz, sz, cudaMemcpyDeviceToDevice);
+
+    // Download scratch buffer and sum on CPU
+    cudaMemcpy(h_velMag, d_velMag, sz, cudaMemcpyDeviceToHost);
+
+    double sum = 0.0;
+    int count = 0;
+    for (size_t i = 0; i < N; i++) {
+        float v = h_velMag[i];
+        if (v > 0.0f) {  // only non-solid cells with actual change
+            sum += (double)v;
+            count++;
+        }
+    }
+
+    float rms = (count > 0) ? sqrtf((float)(sum / count)) : 0.0f;
+    lastRMSChange = rms;
+
+    // Invalidate velMag cache since we overwrote d_velMag as scratch
+    cachedStep_velMag = -1;
+
+    return rms;
+}
+
+// ---------------------------------------------------------------------------
+// computeForces — momentum exchange method (GPU-accelerated)
+// Returns force on solid body in lattice units via Ladd MEA.
+// ---------------------------------------------------------------------------
+void LBM3D::computeForces(float& fx, float& fy, float& fz)
+{
+    // Zero the force accumulator
+    CUDA_CHECK(cudaMemset(d_forceBuf, 0, 3 * sizeof(float)));
+
+    dim3 block(BLOCK, BLOCK, BLOCK);
+    dim3 grid((nx + BLOCK - 1) / BLOCK,
+              (ny + BLOCK - 1) / BLOCK,
+              (nz + BLOCK - 1) / BLOCK);
+
+    momentumExchangeKernel<<<grid, block>>>(d_f, d_cellType, nx, ny, nz, d_forceBuf);
+    CUDA_CHECK(cudaGetLastError());
+
+    float h_force[3];
+    CUDA_CHECK(cudaMemcpy(h_force, d_forceBuf, 3 * sizeof(float), cudaMemcpyDeviceToHost));
+
+    fx = h_force[0];
+    fy = h_force[1];
+    fz = h_force[2];
 }

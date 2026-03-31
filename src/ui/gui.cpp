@@ -1,5 +1,6 @@
 #include "gui.h"
 #include "app.h"
+#include "geometry/primitives.h"
 #include <imgui.h>
 #include <filesystem>
 #include <algorithm>
@@ -83,8 +84,51 @@ void Gui::render(App& app) {
 
     if (ImGui::Button("Browse...", ImVec2(-1, 0))) loadRequested = true;
 
+    // ── TEST MODELS (Validation) ─────────────────
+    ImGui::Spacing();
+    if (ImGui::CollapsingHeader("Validation Models")) {
+        ImGui::TextWrapped("Procedural geometries with known Cd/Cl for solver validation.");
+        if (ImGui::Button("Sphere", ImVec2(-1, 0))) testSphereRequested = true;
+        ImGui::SameLine();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Cd ~ 0.47 (Re 100-10000)");
+        if (ImGui::Button("Cylinder", ImVec2(-1, 0))) testCylinderRequested = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Cd ~ 1.17 (Re 100-10000)");
+        if (ImGui::Button("NACA 0012", ImVec2(-1, 0))) testNACARequested = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Cd ~ 0.012, Cl ~ 0 at 0 AoA");
+    }
+
     ImGui::Spacing();
     ImGui::Separator();
+
+    // ── DOMAIN SETTINGS ──────────────────────────
+    if (!app.simInitialized) {
+        ImGui::Spacing();
+        if (ImGui::CollapsingHeader("Domain Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+            auto& p = app.lbm3dParams;
+
+            // Resolution presets
+            ImGui::Text("Resolution Preset:");
+            if (ImGui::Button("Fast (96)", ImVec2(80, 0))) { p.nx = 128; p.ny = 64; p.nz = 64; }
+            ImGui::SameLine();
+            if (ImGui::Button("Medium (150)", ImVec2(95, 0))) { p.nx = 200; p.ny = 100; p.nz = 100; }
+            ImGui::SameLine();
+            if (ImGui::Button("High (256)", ImVec2(80, 0))) { p.nx = 300; p.ny = 150; p.nz = 150; }
+
+            ImGui::SliderInt("NX", &p.nx, 32, 400);
+            ImGui::SliderInt("NY", &p.ny, 32, 300);
+            ImGui::SliderInt("NZ", &p.nz, 32, 300);
+            ImGui::SliderFloat("Domain Scale", &app.domainScale, 0.2f, 0.6f, "%.2f");
+            ImGui::TextDisabled("Scale: how much of the domain the model fills");
+
+            int cells = p.nx * p.ny * p.nz;
+            float memMB = cells * (19.0f * 2 + 5) * 4.0f / (1024.0f * 1024.0f);
+            ImGui::Text("Cells: %d  (~%.0f MB VRAM)", cells, memMB);
+
+            size_t estMB = ((size_t)app.lbm3dParams.nx * app.lbm3dParams.ny * app.lbm3dParams.nz * 83) / (1024*1024);
+            ImGui::TextColored(estMB > 2000 ? ImVec4(1,0.3f,0.3f,1) : ImVec4(0.5f,0.5f,0.5f,1),
+                               "Est. VRAM: %zu MB", estMB);
+        }
+    }
 
     // ── WIND TUNNEL ──────────────────────────────
     if (!app.model.has_value()) {
@@ -172,20 +216,49 @@ void Gui::render(App& app) {
             }
         }
 
-        // ── Aero coefficients ──
+        // ── Aero coefficients + Validation ──
         ImGui::Spacing();
-        ImGui::Text("Step: %d", app.lbm3d.getStep());
-        ImGui::Text("Cd: %.4f  Cl: %.4f  Cs: %.4f",
-                     app.aeroCoeffs.Cd, app.aeroCoeffs.Cl, app.aeroCoeffs.Cs);
-        ImGui::Text("Fx: %.4f  Fy: %.4f  Fz: %.4f",
-                     app.aeroCoeffs.Fx, app.aeroCoeffs.Fy, app.aeroCoeffs.Fz);
+        if (ImGui::CollapsingHeader("Aerodynamic Coefficients", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Step: %d", app.lbm3d.getStep());
+            ImGui::Text("RMS Change: %.2e", app.convergenceRMS);
+            if (app.converged) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "[Converged]");
+            }
+            ImGui::Text("Cd: %.4f  Cl: %.4f  Cs: %.4f",
+                         app.aeroCoeffs.Cd, app.aeroCoeffs.Cl, app.aeroCoeffs.Cs);
+            ImGui::Text("Fx: %.4f  Fy: %.4f  Fz: %.4f",
+                         app.aeroCoeffs.Fx, app.aeroCoeffs.Fy, app.aeroCoeffs.Fz);
 
-        // ── Cd/Cl history plot ──
-        if (!app.cdHistory.empty()) {
-            ImGui::PlotLines("Cd", app.cdHistory.data(), (int)app.cdHistory.size(),
-                             0, nullptr, FLT_MAX, FLT_MAX, ImVec2(0, 40));
-            ImGui::PlotLines("Cl", app.clHistory.data(), (int)app.clHistory.size(),
-                             0, nullptr, FLT_MAX, FLT_MAX, ImVec2(0, 40));
+            // Show validation comparison if using a test model
+            if (app.validationActive) {
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Validation:");
+                ImGui::Text("Expected Cd: %.4f", app.validationRef.expectedCd);
+                ImGui::Text("Expected Cl: %.4f", app.validationRef.expectedCl);
+                float cdErr = (app.validationRef.expectedCd > 1e-6f) ?
+                    std::abs(app.aeroCoeffs.Cd - app.validationRef.expectedCd) / app.validationRef.expectedCd * 100.0f : 0.0f;
+                float clErr = std::abs(app.aeroCoeffs.Cl - app.validationRef.expectedCl);
+                if (cdErr < 20.0f)
+                    ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "Cd error: %.1f%%", cdErr);
+                else if (cdErr < 50.0f)
+                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Cd error: %.1f%%", cdErr);
+                else
+                    ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.2f, 1.0f), "Cd error: %.1f%% (converging...)", cdErr);
+                ImGui::Text("Cl deviation: %.4f", clErr);
+                ImGui::TextDisabled("Ref: %s", app.validationRef.source);
+                ImGui::TextDisabled("Valid Re: %.0f - %.0f",
+                    app.validationRef.reRange[0], app.validationRef.reRange[1]);
+            }
+
+            // Cd/Cl history plot
+            if (!app.cdHistory.empty()) {
+                ImGui::PlotLines("Cd", app.cdHistory.data(), (int)app.cdHistory.size(),
+                                 0, nullptr, FLT_MAX, FLT_MAX, ImVec2(0, 40));
+                ImGui::PlotLines("Cl", app.clHistory.data(), (int)app.clHistory.size(),
+                                 0, nullptr, FLT_MAX, FLT_MAX, ImVec2(0, 40));
+            }
         }
 
         // ── Export ──
@@ -193,10 +266,23 @@ void Gui::render(App& app) {
         if (ImGui::CollapsingHeader("Export")) {
             if (ImGui::Button("Screenshot (BMP)", ImVec2(-1, 0)))
                 screenshotRequested = true;
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Data");
             if (ImGui::Button("Export VTK (ParaView)", ImVec2(-1, 0)))
                 exportVTKRequested = true;
             if (ImGui::Button("Export CSV (Cd/Cl)", ImVec2(-1, 0)))
                 exportCSVRequested = true;
+            if (ImGui::Button("Export Flow Field CSV", ImVec2(-1, 0)))
+                exportFlowCSVRequested = true;
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Reports");
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.4f, 0.7f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.2f, 0.5f, 0.85f, 1.0f));
+            if (ImGui::Button("Full Report (HTML)", ImVec2(-1, 0)))
+                exportReportRequested = true;
+            ImGui::PopStyleColor(2);
         }
 
         if (ImGui::Button("Reset Simulation", ImVec2(-1, 0)))

@@ -11,16 +11,16 @@
 static const char* jetVertSrc = R"(
 #version 460 core
 layout(location=0) in vec3 aPos;
-layout(location=1) in float aVelocity;
+layout(location=1) in float aDeviation;
 
 uniform mat4 uMVP;
-uniform float uMaxVel;
 
 out float vT;
 
 void main() {
     gl_Position = uMVP * vec4(aPos, 1.0);
-    vT = clamp(aVelocity / max(uMaxVel, 1e-6), 0.0, 1.0);
+    gl_PointSize = 3.0;
+    vT = aDeviation;
 }
 )";
 
@@ -29,25 +29,28 @@ static const char* jetFragSrc = R"(
 in float vT;
 out vec4 FragColor;
 
-vec3 viridis(float t) {
+vec3 flowColor(float t) {
     t = clamp(t, 0.0, 1.0);
-    vec3 c0 = vec3(0.267, 0.004, 0.329);
-    vec3 c1 = vec3(0.282, 0.140, 0.458);
-    vec3 c2 = vec3(0.212, 0.359, 0.551);
-    vec3 c3 = vec3(0.127, 0.566, 0.551);
-    vec3 c4 = vec3(0.267, 0.749, 0.440);
-    vec3 c5 = vec3(0.741, 0.873, 0.150);
-    vec3 c6 = vec3(0.993, 0.906, 0.144);
-    if (t < 0.167) return mix(c0, c1, t / 0.167);
-    if (t < 0.333) return mix(c1, c2, (t - 0.167) / 0.167);
-    if (t < 0.500) return mix(c2, c3, (t - 0.333) / 0.167);
-    if (t < 0.667) return mix(c3, c4, (t - 0.500) / 0.167);
-    if (t < 0.833) return mix(c4, c5, (t - 0.667) / 0.167);
-    return mix(c5, c6, (t - 0.833) / 0.167);
+    vec3 c0 = vec3(0.75, 0.88, 1.00);
+    vec3 c1 = vec3(0.12, 0.42, 0.93);
+    vec3 c2 = vec3(0.00, 0.72, 0.88);
+    vec3 c3 = vec3(0.15, 0.85, 0.35);
+    vec3 c4 = vec3(0.93, 0.88, 0.12);
+    vec3 c5 = vec3(0.95, 0.42, 0.05);
+    vec3 c6 = vec3(0.82, 0.08, 0.08);
+    vec3 c7 = vec3(0.50, 0.00, 0.35);
+
+    if (t < 0.04) return mix(c0, c1, t / 0.04);
+    if (t < 0.12) return mix(c1, c2, (t - 0.04) / 0.08);
+    if (t < 0.25) return mix(c2, c3, (t - 0.12) / 0.13);
+    if (t < 0.40) return mix(c3, c4, (t - 0.25) / 0.15);
+    if (t < 0.55) return mix(c4, c5, (t - 0.40) / 0.15);
+    if (t < 0.75) return mix(c5, c6, (t - 0.55) / 0.20);
+    return mix(c6, c7, (t - 0.75) / 0.25);
 }
 
 void main() {
-    FragColor = vec4(viridis(vT), 0.85);
+    FragColor = vec4(flowColor(vT), 0.90);
 }
 )";
 
@@ -90,12 +93,11 @@ static unsigned int compileShaderProgram(const char* vSrc, const char* fSrc) {
 
 // ── Grid-to-world mapping ───────────────────────────
 
-static glm::vec3 gridToWorld(float gx, float gy, float gz, int nx, int ny, int nz) {
-    float maxDim = (float)std::max({nx, ny, nz});
+static glm::vec3 gridToWorld(float gx, float gy, float gz, int nx, int ny, int nz, float voxelSize) {
     return glm::vec3(
-        (gx - nx * 0.5f) / (maxDim * 0.5f),
-        (gy - ny * 0.5f) / (maxDim * 0.5f),
-        (gz - nz * 0.5f) / (maxDim * 0.5f)
+        (gx - nx * 0.5f) * voxelSize,
+        (gy - ny * 0.5f) * voxelSize,
+        (gz - nz * 0.5f) * voxelSize
     );
 }
 
@@ -141,32 +143,151 @@ glm::vec3 ParticleRenderer::interpolateVelocity(
     return glm::vec3(lerp3D(ux), lerp3D(uy), lerp3D(uz));
 }
 
-// ── Seed generation ─────────────────────────────────
+// ── Deviation angle from freestream ─────────────────
 
-void ParticleRenderer::generateSeeds(int ny, int nz) {
+static float computeDeviation(glm::vec3 vel, glm::vec3 inletDir) {
+    float mag = glm::length(vel);
+    if (mag < 1e-6f) return 0.5f;
+    glm::vec3 dir = vel / mag;
+    float cosAngle = glm::clamp(glm::dot(dir, inletDir), -1.0f, 1.0f);
+    return std::acos(cosAngle) / 3.14159265f;
+}
+
+// ── Solid AABB detection ────────────────────────────
+
+struct GridAABB {
+    int mn[3], mx[3];
+    bool valid = false;
+};
+
+static GridAABB findSolidAABB(const uint8_t* cellTypes, int nx, int ny, int nz) {
+    GridAABB bb;
+    bb.mn[0] = nx; bb.mn[1] = ny; bb.mn[2] = nz;
+    bb.mx[0] = 0;  bb.mx[1] = 0;  bb.mx[2] = 0;
+    for (int z = 0; z < nz; z++)
+        for (int y = 0; y < ny; y++)
+            for (int x = 0; x < nx; x++)
+                if (cellTypes[z * nx * ny + y * nx + x] == 1) {
+                    bb.mn[0] = std::min(bb.mn[0], x);
+                    bb.mn[1] = std::min(bb.mn[1], y);
+                    bb.mn[2] = std::min(bb.mn[2], z);
+                    bb.mx[0] = std::max(bb.mx[0], x);
+                    bb.mx[1] = std::max(bb.mx[1], y);
+                    bb.mx[2] = std::max(bb.mx[2], z);
+                    bb.valid = true;
+                }
+    return bb;
+}
+
+// ── Adaptive seed generation ────────────────────────
+//
+// Seeds are sized to the model: dense grid covering the solid AABB
+// (with a small margin), plus a single sparse ring just outside.
+// This ensures most jets interact with the object and very few fly
+// past without touching it.
+
+void ParticleRenderer::generateSeeds(int nx, int ny, int nz,
+                                      const uint8_t* cellTypes,
+                                      WindDirection windDir)
+{
     jetSeeds.clear();
 
-    // Create a grid of seed points on the Y-Z plane, with some jitter
-    int sqrtN = (int)std::ceil(std::sqrt((float)numJets));
-    float dy = (float)(ny - 4) / (float)(sqrtN + 1);
-    float dz = (float)(nz - 4) / (float)(sqrtN + 1);
+    int dim[3] = {nx, ny, nz};
+    int fixedAxis;
+    switch (windDir) {
+        case WIND_POS_X: case WIND_NEG_X: fixedAxis = 0; break;
+        case WIND_POS_Z: case WIND_NEG_Z: fixedAxis = 2; break;
+        case WIND_POS_Y: case WIND_NEG_Y: fixedAxis = 1; break;
+    }
+    int a1 = (fixedAxis == 0) ? 1 : 0;
+    int a2 = (fixedAxis == 2) ? 1 : 2;
+
+    GridAABB solidBB = findSolidAABB(cellTypes, nx, ny, nz);
 
     std::mt19937 rng(42);
-    std::uniform_real_distribution<float> jitter(-0.3f, 0.3f);
+    std::uniform_real_distribution<float> jitter(-0.4f, 0.4f);
 
-    int count = 0;
-    for (int iy = 0; iy < sqrtN && count < numJets; iy++) {
-        for (int iz = 0; iz < sqrtN && count < numJets; iz++) {
-            float seedY = 2.0f + (iy + 1) * dy + jitter(rng);
-            float seedZ = 2.0f + (iz + 1) * dz + jitter(rng);
-            jetSeeds.push_back(glm::vec2(seedY, seedZ));
-            count++;
+    if (solidBB.valid) {
+        float size1 = (float)(solidBB.mx[a1] - solidBB.mn[a1]);
+        float size2 = (float)(solidBB.mx[a2] - solidBB.mn[a2]);
+
+        // Large wind wall: generous margins all around so the wind
+        // visually covers the entire model and beyond. Extra above.
+        float margin1Lo = std::max(size1 * 0.50f, 5.0f);
+        float margin1Hi = std::max(size1 * 0.80f, 8.0f);
+        float margin2Lo = std::max(size2 * 0.50f, 5.0f);
+        float margin2Hi = std::max(size2 * 0.50f, 5.0f);
+        float cMin1 = std::max(2.0f, (float)solidBB.mn[a1] - margin1Lo);
+        float cMax1 = std::min((float)(dim[a1] - 2), (float)solidBB.mx[a1] + margin1Hi);
+        float cMin2 = std::max(2.0f, (float)solidBB.mn[a2] - margin2Lo);
+        float cMax2 = std::min((float)(dim[a2] - 2), (float)solidBB.mx[a2] + margin2Hi);
+
+        // Dense grid: one jet every ~3 cells
+        float spacing = 3.0f;
+        int n1 = std::max(3, (int)std::round((cMax1 - cMin1) / spacing));
+        int n2 = std::max(3, (int)std::round((cMax2 - cMin2) / spacing));
+
+        // Large budget
+        int maxJets = numJets;
+        while (n1 * n2 > maxJets && spacing < 10.0f) {
+            spacing += 0.5f;
+            n1 = std::max(3, (int)std::round((cMax1 - cMin1) / spacing));
+            n2 = std::max(3, (int)std::round((cMax2 - cMin2) / spacing));
         }
+
+        // Core seeds (dense grid over object + extended upward)
+        float d1 = (cMax1 - cMin1) / (float)(n1 + 1);
+        float d2 = (cMax2 - cMin2) / (float)(n2 + 1);
+        for (int i1 = 1; i1 <= n1; i1++)
+            for (int i2 = 1; i2 <= n2; i2++) {
+                jetSeeds.push_back(glm::vec2(
+                    cMin1 + i1 * d1 + jitter(rng),
+                    cMin2 + i2 * d2 + jitter(rng)
+                ));
+            }
+
+        // Context ring: single layer of jets just outside the core zone
+        float ringGap = spacing;
+        float rMin1 = std::max(2.0f, cMin1 - ringGap);
+        float rMax1 = std::min((float)(dim[a1] - 2), cMax1 + ringGap);
+        float rMin2 = std::max(2.0f, cMin2 - ringGap);
+        float rMax2 = std::min((float)(dim[a2] - 2), cMax2 + ringGap);
+
+        int rn1 = std::max(2, (int)std::round((rMax1 - rMin1) / (spacing * 1.5f)));
+        int rn2 = std::max(2, (int)std::round((rMax2 - rMin2) / (spacing * 1.5f)));
+        float rd1 = (rMax1 - rMin1) / (float)(rn1 + 1);
+        float rd2 = (rMax2 - rMin2) / (float)(rn2 + 1);
+
+        for (int i1 = 1; i1 <= rn1; i1++)
+            for (int i2 = 1; i2 <= rn2; i2++) {
+                float p1 = rMin1 + i1 * rd1 + jitter(rng);
+                float p2 = rMin2 + i2 * rd2 + jitter(rng);
+                // Only add if outside core zone (the ring, not the filled core)
+                if (p1 < cMin1 || p1 > cMax1 || p2 < cMin2 || p2 > cMax2) {
+                    jetSeeds.push_back(glm::vec2(p1, p2));
+                }
+            }
+
+    } else {
+        // No solid found: sparse uniform grid
+        int side = std::max(3, (int)std::sqrt((float)numJets));
+        float d1 = (float)(dim[a1] - 4) / (float)(side + 1);
+        float d2 = (float)(dim[a2] - 4) / (float)(side + 1);
+        for (int i1 = 1; i1 <= side; i1++)
+            for (int i2 = 1; i2 <= side; i2++)
+                jetSeeds.push_back(glm::vec2(
+                    2.0f + i1 * d1 + jitter(rng),
+                    2.0f + i2 * d2 + jitter(rng)
+                ));
     }
+
+    // Update numJets to reflect actual count
+    numJets = (int)jetSeeds.size();
 
     seedsGenerated = true;
     lastNy = ny;
     lastNz = nz;
+    cachedWindDir = windDir;
 }
 
 // ── Public API ──────────────────────────────────────
@@ -195,7 +316,8 @@ void ParticleRenderer::shutdown() {
 
 void ParticleRenderer::update(
     float dt, const float* ux, const float* uy, const float* uz,
-    int nx, int ny, int nz, const uint8_t* cellTypes)
+    int nx, int ny, int nz, const uint8_t* cellTypes,
+    WindDirection windDir, glm::vec3 inletDir)
 {
     if (!ux || !uy || !uz) return;
 
@@ -203,22 +325,98 @@ void ParticleRenderer::update(
     cachedNy = ny;
     cachedNz = nz;
 
-    // Generate seed points if needed
-    if (!seedsGenerated || lastNy != ny || lastNz != nz)
-        generateSeeds(ny, nz);
+    // Normalize inlet direction
+    float inletMag = glm::length(inletDir);
+    if (inletMag > 1e-6f) inletDir /= inletMag;
+    else inletDir = glm::vec3(1, 0, 0);
+
+    if (!seedsGenerated || lastNy != ny || lastNz != nz || cachedWindDir != windDir)
+        generateSeeds(nx, ny, nz, cellTypes, windDir);
+
+    // Figure out injection axis and slice
+    int dim[3] = {nx, ny, nz};
+    int fixedAxis, seedSlice;
+    switch (windDir) {
+        case WIND_POS_X: fixedAxis = 0; seedSlice = 2;        break;
+        case WIND_NEG_X: fixedAxis = 0; seedSlice = nx - 3;   break;
+        case WIND_POS_Z: fixedAxis = 2; seedSlice = 2;        break;
+        case WIND_NEG_Z: fixedAxis = 2; seedSlice = nz - 3;   break;
+        case WIND_POS_Y: fixedAxis = 1; seedSlice = 2;        break;
+        case WIND_NEG_Y: fixedAxis = 1; seedSlice = ny - 3;   break;
+    }
+    int a1 = (fixedAxis == 0) ? 1 : 0;
+    int a2 = (fixedAxis == 2) ? 1 : 2;
 
     auto idx = [&](int x, int y, int z) -> int {
         return z * nx * ny + y * nx + x;
     };
 
-    // Advect existing particles
+    auto inBounds = [&](glm::vec3 p) -> bool {
+        return p.x >= 0 && p.x < nx - 1 && p.y >= 1 && p.y < ny - 1 && p.z >= 1 && p.z < nz - 1;
+    };
+
+    auto isSolid = [&](glm::vec3 p) -> bool {
+        if (!inBounds(p)) return true;
+        return cellTypes && cellTypes[idx((int)p.x, (int)p.y, (int)p.z)] == 1;
+    };
+
+    // RK2 advection with collision deflection
     for (auto& p : particles) {
-        glm::vec3 vel = interpolateVelocity(ux, uy, uz, nx, ny, nz, p.pos);
-        p.pos += vel;  // one LBM step = one grid unit of advection
-        p.velocity = glm::length(vel);
+        glm::vec3 vel1 = interpolateVelocity(ux, uy, uz, nx, ny, nz, p.pos);
+
+        // RK2 midpoint
+        glm::vec3 midPos = p.pos + 0.5f * vel1;
+        glm::vec3 vel2 = vel1;
+        if (inBounds(midPos) && !isSolid(midPos))
+            vel2 = interpolateVelocity(ux, uy, uz, nx, ny, nz, midPos);
+
+        glm::vec3 newPos = p.pos + vel2;
+        p.velocity = glm::length(vel2);
+        p.deviation = computeDeviation(vel2, inletDir);
+        p.age += 1.0f;
+
+        // Collision detection + deflection
+        if (isSolid(newPos) && p.bounces < 5) {
+            p.bounces++;
+            glm::vec3 normal(0.0f);
+            int cx = (int)p.pos.x, cy = (int)p.pos.y, cz = (int)p.pos.z;
+            int nx_ = (int)newPos.x, ny_ = (int)newPos.y, nz_ = (int)newPos.z;
+
+            if (nx_ != cx && inBounds(glm::vec3((float)nx_, (float)cy, (float)cz)) &&
+                cellTypes[idx(nx_, cy, cz)] == 1)
+                normal.x = (nx_ > cx) ? -1.0f : 1.0f;
+            if (ny_ != cy && inBounds(glm::vec3((float)cx, (float)ny_, (float)cz)) &&
+                cellTypes[idx(cx, ny_, cz)] == 1)
+                normal.y = (ny_ > cy) ? -1.0f : 1.0f;
+            if (nz_ != cz && inBounds(glm::vec3((float)cx, (float)cy, (float)nz_)) &&
+                cellTypes[idx(cx, cy, nz_)] == 1)
+                normal.z = (nz_ > cz) ? -1.0f : 1.0f;
+
+            float nLen = glm::length(normal);
+            if (nLen > 0.001f) {
+                normal /= nLen;
+                // Slide along surface (tangent component)
+                glm::vec3 tangent = vel2 - glm::dot(vel2, normal) * normal;
+                glm::vec3 tanPos = p.pos + tangent;
+                if (inBounds(tanPos) && !isSolid(tanPos)) {
+                    p.pos = tanPos;
+                    continue;
+                }
+                // Try reflected
+                glm::vec3 reflected = vel2 - 2.0f * glm::dot(vel2, normal) * normal;
+                glm::vec3 refPos = p.pos + reflected;
+                if (inBounds(refPos) && !isSolid(refPos)) {
+                    p.pos = refPos;
+                    continue;
+                }
+            }
+            p.pos = glm::vec3(-1);
+        } else {
+            p.pos = newPos;
+        }
     }
 
-    // Remove out-of-bounds or solid-hitting particles
+    // Remove out-of-bounds, dead, or solid-stuck particles
     particles.erase(
         std::remove_if(particles.begin(), particles.end(),
             [&](const Particle& p) {
@@ -226,49 +424,50 @@ void ParticleRenderer::update(
                     p.pos.y < 1 || p.pos.y >= ny - 1 ||
                     p.pos.z < 1 || p.pos.z >= nz - 1)
                     return true;
-                int cx = (int)p.pos.x;
-                int cy = (int)p.pos.y;
-                int cz = (int)p.pos.z;
-                if (cellTypes && cellTypes[idx(cx, cy, cz)] == 1)
+                if (isSolid(p.pos))
                     return true;
                 return false;
             }),
         particles.end());
 
-    // Inject new particles at each jet seed point (at inlet x=1)
-    // Each jet gets a few particles per frame to form a continuous stream
-    int maxTotal = numJets * 150; // max ~150 particles per jet
+    // Inject new particles at inlet
+    int maxTotal = numJets * 180;
     int available = maxTotal - (int)particles.size();
     if (available <= 0) return;
 
-    int perJet = std::max(1, available / (int)jetSeeds.size());
-    perJet = std::min(perJet, 2); // inject 1-2 per jet per frame
+    int perJet = std::max(1, std::min(3, available / std::max(1, (int)jetSeeds.size())));
 
     for (int j = 0; j < (int)jetSeeds.size() && (int)particles.size() < maxTotal; j++) {
         for (int k = 0; k < perJet; k++) {
             Particle p;
-            p.pos = glm::vec3(1.5f, jetSeeds[j].x, jetSeeds[j].y);
+            float coords[3];
+            coords[fixedAxis] = (float)seedSlice + 0.5f;
+            coords[a1] = jetSeeds[j].x;
+            coords[a2] = jetSeeds[j].y;
+            p.pos = glm::vec3(coords[0], coords[1], coords[2]);
             p.velocity = 0.0f;
+            p.deviation = 0.0f;
             p.jetId = j;
+            p.bounces = 0;
+            p.age = 0.0f;
             particles.push_back(p);
         }
     }
 }
 
-void ParticleRenderer::render(const glm::mat4& mvp, float maxVel) {
+void ParticleRenderer::render(const glm::mat4& mvp, float maxVel, float voxelSize) {
     if (particles.empty() || cachedNx == 0) return;
 
-    // Sort particles by jet ID so we can render each jet as a line strip
+    // Sort by jet ID for line strip rendering
     std::sort(particles.begin(), particles.end(),
         [](const Particle& a, const Particle& b) {
             if (a.jetId != b.jetId) return a.jetId < b.jetId;
-            return a.pos.x < b.pos.x; // sort along wind direction within jet
+            return a.age < b.age;
         });
 
-    // Build GPU buffer and track jet offsets
     struct GPUVertex {
         glm::vec3 pos;
-        float velocity;
+        float deviation;
     };
 
     std::vector<GPUVertex> verts;
@@ -286,8 +485,8 @@ void ParticleRenderer::render(const glm::mat4& mvp, float maxVel) {
             currentJet = p.jetId;
         }
         GPUVertex v;
-        v.pos = gridToWorld(p.pos.x, p.pos.y, p.pos.z, cachedNx, cachedNy, cachedNz);
-        v.velocity = p.velocity;
+        v.pos = gridToWorld(p.pos.x, p.pos.y, p.pos.z, cachedNx, cachedNy, cachedNz, voxelSize);
+        v.deviation = p.deviation;
         verts.push_back(v);
     }
     if (!jetOffsets.empty())
@@ -304,18 +503,16 @@ void ParticleRenderer::render(const glm::mat4& mvp, float maxVel) {
                           (void*)offsetof(GPUVertex, pos));
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, sizeof(GPUVertex),
-                          (void*)offsetof(GPUVertex, velocity));
+                          (void*)offsetof(GPUVertex, deviation));
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
     glUseProgram(shader);
     glUniformMatrix4fv(glGetUniformLocation(shader, "uMVP"), 1, GL_FALSE, glm::value_ptr(mvp));
-    glUniform1f(glGetUniformLocation(shader, "uMaxVel"), maxVel);
 
     glLineWidth(2.0f);
 
-    // Draw each jet as a line strip
     for (size_t i = 0; i < jetOffsets.size(); i++) {
         if (jetLengths[i] >= 2)
             glDrawArrays(GL_LINE_STRIP, jetOffsets[i], jetLengths[i]);

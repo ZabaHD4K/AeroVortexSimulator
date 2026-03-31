@@ -9,6 +9,7 @@
 #include "visualization/volume_renderer.h"
 #include "ui/gui.h"
 #include "geometry/mesh.h"
+#include "geometry/primitives.h"
 #include "core/lbm3d.cuh"
 #include "core/lbm2d.cuh"
 #include "core/aero_forces.h"
@@ -53,7 +54,7 @@ public:
     int sliceField = 0;  // 0=velocity, 1=pressure, 2=vorticity
 
     // Streamline config
-    int numStreamlines = 300;
+    int numStreamlines = 400;
 
     // Volume rendering config
     int volumeField = 0; // 0=velocity, 1=pressure, 2=vorticity
@@ -61,10 +62,19 @@ public:
     // Simulation state
     bool simInitialized = false;
     float domainScale = 0.4f;
+    float voxelSize = 0.05f;  // size of each voxel in world units (set by voxelizer)
 
     // Aero coefficient history for plotting
     std::vector<float> cdHistory;
     std::vector<float> clHistory;
+
+    // Convergence detection
+    float convergenceRMS = 1.0f;
+    bool converged = false;
+
+    // Validation
+    bool validationActive = false;
+    ValidationRef validationRef = {};
 
 private:
     GLFWwindow* window = nullptr;

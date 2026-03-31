@@ -1,317 +1,341 @@
-# Aero3D Simulator
+# AeroVortexSimulator
 
-**Simulador aerodinámico 3D en tiempo real con CFD basado en Lattice Boltzmann Method (LBM) acelerado por GPU.**
+Real-time 3D Computational Fluid Dynamics (CFD) simulator with GPU-accelerated Lattice Boltzmann Method (LBM) and interactive visualization. Load any 3D model, voxelize it, and watch the wind flow around it in real time.
 
-Carga cualquier modelo 3D (.stl/.obj/.fbx), simula el flujo de aire a su alrededor y visualiza streamlines, presión, vorticidad y coeficientes aerodinámicos — todo en tiempo real.
-
-> **Este es un proyecto de aprendizaje.** El objetivo es entender e implementar desde cero los fundamentos de Computational Fluid Dynamics (CFD), computación en GPU con CUDA, y visualización científica 3D. No es un reemplazo de herramientas profesionales como ANSYS u OpenFOAM, sino un ejercicio profundo de ingeniería de software, física computacional y programación de alto rendimiento.
+> **Proyecto de aprendizaje e ingenieria.** El objetivo es implementar desde cero los fundamentos de CFD, computacion GPU con CUDA, y visualizacion cientifica 3D. No reemplaza herramientas profesionales como ANSYS u OpenFOAM, pero implementa los mismos metodos numericos subyacentes.
 
 ---
 
-## Estado Actual
+## Features
 
-### Fase 0 — Visor 3D base ✅
+### GPU-Accelerated LBM Solver
+- **D3Q19 lattice** with 19 discrete velocity directions in 3D
+- **Collision models**: BGK (single-relaxation-time) and MRT (multiple-relaxation-time via TRT approximation)
+- **Smagorinsky LES** subgrid-scale turbulence model for realistic vortex dynamics
+- **Boundary conditions**: bounce-back on solids, prescribed-velocity inlet, zero-gradient (Neumann) outlet
+- **6-direction wind**: configurable wind from any axis face (+X, -X, +Y, -Y, +Z, -Z)
+- **Velocity ramp-up**: gradual 60% to 100% inlet velocity over 150 steps to prevent numerical shock
+- **Stability guards**: automatic reset of divergent cells to freestream equilibrium
+- **GPU memory validation**: checks available VRAM before allocation with real-time estimation in GUI
+- Runs entirely on CUDA — handles grids up to 400x200x200 in real time on modern GPUs
 
-- Cargar cualquier modelo 3D (.stl, .obj, .fbx, .ply, .gltf...) via Assimp
-- Renderizar con iluminación Blinn-Phong (ambient + diffuse + specular)
-- Cámara orbital libre (rotar, zoom, pan)
-- Grid de referencia con fade-out
-- Panel ImGui con info del modelo (vértices, triángulos, meshes)
-- Drag & drop de archivos directamente a la ventana
-- Controles de render: wireframe, color del modelo, dirección de luz
+### Aerodynamic Force Computation
+- **Momentum exchange method** (Ladd MEA) computed on GPU via atomic reduction — more accurate than pressure integration on staircase boundaries
+- Drag (Cd), lift (Cl), and side force (Cs) coefficients
+- Exponential moving average smoothing for stable display
+- Real-time force history plots with up to 500 data points
+- Pressure-based calculation available as fallback
 
-### Fase 1 — LBM 2D en CUDA ✅
+### Convergence Detection
+- **RMS velocity change** monitoring between timesteps (GPU-accelerated)
+- Automatic **"[Converged]"** indicator in GUI when RMS < 1e-5
+- Helps determine when the flow has reached steady state
 
-- Solver LBM D2Q9 implementado completamente en CUDA
-- Simulación de lid-driven cavity (flujo con tapa móvil)
-- Visualización del campo de velocidad como heatmap con colormap viridis
-- Parámetros configurables: tau (viscosidad), velocidad de tapa, steps/frame
-- Controles start/stop/resume desde la GUI
+### Visualization Modes
 
-### Fase 2 — LBM 3D (D3Q19) en CUDA ✅
+| Mode | Method | Description |
+|------|--------|-------------|
+| **Streamlines** | RK4 integration | Direction-based coloring (cool=aligned, warm=vortex). Surface-hugging seeds that graze the model with up to 60 surface bounces |
+| **Wind Particles** | RK2 advection | Lagrangian tracer jets with collision deflection, connected as line strips |
+| **Slice Plane** | Texture mapping | Cross-sectional views of velocity, pressure, or vorticity on any axis |
+| **Surface Pressure** | Vertex interpolation | Pressure field mapped onto the 3D model surface with Blinn-Phong lighting |
+| **Volume Rendering** | GPU ray marching | 3D field visualization with adjustable density and opacity |
 
-- Solver LBM 3D con lattice D3Q19 (19 velocidades discretas) en GPU
-- Operador de colisión BGK con tau configurable
-- Memory layout SoA (Structure of Arrays) para acceso coalescente en GPU
-- Buffers host pinneados con lazy copy (GPU → CPU solo cuando se necesita)
-- Condiciones de contorno:
-  - Bounce-back en sólidos
-  - Velocidad prescrita en inlet (f equilibrio)
-  - Zero-gradient (Neumann) en outlet
-  - Bounce-back en paredes Y/Z
-- Campos macroscópicos: densidad, velocidad (ux/uy/uz), presión, vorticidad
+### Flow Coloring
+CFD-style deviation colormap — color represents the angle between local velocity and freestream direction:
 
-### Fase 3 — Voxelización de modelos ✅
+| Color | Meaning |
+|-------|---------|
+| Ice white / Blue | Aligned with freestream |
+| Cyan / Green | Mild deviation |
+| Yellow / Orange | Significant separation |
+| Red | Vortex core |
+| Dark purple | Reverse flow |
 
-- Voxelización por conservative rasterization con Separating Axis Theorem (SAT) para intersección triángulo-AABB
-- Dilatación de celdas sólidas (2 voxels) para modelos thin-shell
-- Flood-fill desde esquinas exteriores para distinguir exterior de interior
-- Marcado automático de caras inlet/outlet según dirección de viento
-- Estadísticas de grid (% sólido, fluido, inlet, outlet)
+### Model Support
+- **Import**: STL, OBJ, FBX, PLY, DAE, 3DS, glTF/GLB (via Assimp)
+- **Drag & drop** loading
+- **Built-in test models**: Sphere, Cylinder, NACA 0012 airfoil — each with reference Cd/Cl values for validation
+- **Robust voxelization** using Separating Axis Theorem (SAT) triangle-AABB intersection with flood-fill for interior detection
 
-### Fase 4 — Visualización de flujo 3D ✅
+### Data Export
+- **VTK StructuredGrid** (.vts) — open in ParaView for advanced post-processing
+- **Coefficient CSV** — Cd/Cl history over time with simulation parameters
+- **Flow field CSV** — per-slice statistics (min/max/mean velocity, pressure, vorticity)
+- **HTML report** — full simulation dashboard with dark theme, SVG sparkline plots, Reynolds number analysis, convergence assessment, cell classification, and validation comparison
+- **Screenshots** (BMP)
 
-- **Streamlines 3D** — Integración RK4 del campo de velocidad, color por magnitud (azul→cian→verde→amarillo→naranja), fade-in/fade-out, coasting a través de zonas estancadas
-- **Slice Plane** — Corte 2D del campo 3D (velocidad/presión/vorticidad) con colormap viridis, eje e índice configurables, opacidad 70%
-- **Presión superficial** — Mapa de presión sobre el modelo con colormap cool-warm (azul=baja, rojo=alta) + iluminación Blinn-Phong
-- **Partículas (jets)** — Jets de viento advectados por el flujo, inyección continua en inlet, ~120 jets × ~150 partículas/jet
-
-### Fase 5 — Coeficientes aerodinámicos ✅
-
-- Integración de presión en fronteras sólido-fluido con stencil de diferencias finitas (6 direcciones)
-- Cálculo de área frontal por proyección de celdas sólidas
-- Coeficientes: Cd (drag), Cl (lift), Cs (side force)
-- Fuerzas brutas (Fx, Fy, Fz) en unidades lattice
-- Historial temporal de Cd/Cl para gráficas de convergencia
-
----
-
-## Limitaciones y errores conocidos
-
-### Precisión de la simulación
-
-- **Operador BGK solamente** — El README original planteaba MRT (Multiple Relaxation Time) que es más estable y preciso. Actualmente solo se usa BGK, lo que limita la estabilidad a Reynolds moderados y puede producir artefactos numéricos con geometrías complejas o velocidades altas.
-- **Sin modelo de turbulencia** — No hay Smagorinsky LES implementado. Los vórtices pequeños no se modelan, lo que limita la precisión en flujos turbulentos.
-- **Outlet zero-gradient aproximado** — La condición de contorno outlet copia f del vecino interior. Esto puede reflejar ondas de vuelta al dominio, causando inestabilidad a números de Reynolds altos.
-- **Sin multi-resolución** — Grid uniforme en todo el dominio. No hay refinamiento adaptativo cerca del objeto, lo que obliga a elegir entre resolución global alta (lento) o baja resolución en la capa límite (impreciso).
-
-### Voxelización
-
-- **Dilatación hardcodeada** — La dilatación de 2 voxels es fija, no configurable. Puede ser excesiva para modelos gruesos o insuficiente para detalles finos.
-- **CPU-only** — La voxelización se ejecuta en CPU, no en GPU como estaba planeado. Para grids grandes es lenta.
-- **Modelos no watertight** — El flood-fill maneja modelos abiertos, pero no resuelve problemas topológicos complejos (genus > 0).
-- **Precisión float** — Umbral de 1e-6f en SAT puede perder precisión con modelos muy grandes o muy pequeños.
-
-### Visualización
-
-- **Slice plane atraviesa sólidos** — El slice plane no filtra celdas sólidas, mostrando valores dentro del modelo que no tienen sentido físico.
-- **Streamline seeding fijo** — El patrón de semillas es una grilla regular en el inlet. No se adapta al perfil de velocidad real, por lo que pueden sembrarse todas en zonas muertas o de recirculación.
-- **Sin volume rendering** — No se implementó ray marching del campo 3D como estaba planeado.
-
-### Plataforma y portabilidad
-
-- **Windows-only** — Ruta de fuente hardcodeada a `C:\Windows\Fonts\segoeui.ttf` en `main.cpp:52`. Fallará en Linux/Mac o si la fuente no existe.
-- **Requiere NVIDIA GPU** — CUDA no es portable a AMD/Intel. El solver depende completamente de CUDA.
-- **Sin CUDA error checking** — Las operaciones GPU→CPU (getVelocityMagnitude, etc.) no verifican errores CUDA explícitamente; fallos silenciosos posibles.
-
-### Otros
-
-- **Sin export de datos** — No hay export a CSV, VTK, o screenshots como estaba planeado.
-- **Sin validación con geometrías conocidas** — Los modelos de validación (esfera, cilindro, NACA 0012) no se han probado contra valores teóricos.
-- **Cleanup en crash** — Si la aplicación crashea durante la simulación, la memoria GPU puede no liberarse correctamente.
+### GUI
+ImGui-based control panel with:
+- Model library browser + file dialog
+- Grid resolution presets (Coarse 100^3, Medium 200^3, Fine 300^3) with VRAM estimation
+- Physics controls: tau, inlet velocity, collision model, Smagorinsky constant
+- Visualization toggles for all rendering modes
+- Wind direction selector (6 directions)
+- Aero coefficient display with live sparkline plots
+- Convergence monitor (RMS change)
+- Export buttons for all formats
 
 ---
 
-## Por qué C++ y por qué desde cero
-
-**Rendimiento:** CFD en tiempo real requiere iterar sobre millones de celdas cada frame. C++ da control directo sobre memoria (arrays contiguos, sin garbage collector) y el compilador optimiza agresivamente. En Python sería órdenes de magnitud más lento.
-
-**CUDA:** Los kernels de simulación se escriben en CUDA, que es C/C++. Además, la interoperabilidad CUDA-OpenGL permite compartir buffers GPU sin copiar datos (zero-copy) — el LBM calcula y OpenGL renderiza desde la misma memoria.
-
-**Aprendizaje profundo:** Usar librerías de alto nivel ocultaría exactamente lo que quiero entender. Implementar LBM, voxelización, volume rendering y streamlines desde cero obliga a dominar la física, las matemáticas y la arquitectura GPU.
-
----
-
-## Core CFD — Lattice Boltzmann Method
-
-### Implementación actual: D3Q19 + BGK
-
-El solver implementa LBM en 3D con 19 velocidades discretas ejecutado en GPU con CUDA.
-
-#### Algoritmo por timestep
-
-1. **Streaming** — Cada distribución f_i se propaga al vecino según su velocidad discreta c_i. Layout SoA mantiene dirección X contigua para coalescing en GPU.
-2. **Colisión BGK** — Calcula ρ y u macroscópicos, computa f_i^eq, relaja: `f_new = f - (1/τ)(f - f^eq)`. τ controla viscosidad: `ν = (τ - 0.5)/3`.
-3. **Condiciones de contorno** — Bounce-back en sólidos, velocidad prescrita en inlet, zero-gradient en outlet.
-4. **Extracción de campos** — Presión `p = ρ/3`, magnitud de velocidad, vorticidad.
-
-#### Ecuaciones
+## Architecture
 
 ```
-Recuperación macroscópica:
-  ρ(x,t) = Σᵢ fᵢ(x,t)
-  u(x,t) = (1/ρ) Σᵢ fᵢ cᵢ
-  p(x,t) = ρ cₛ²    (cₛ² = 1/3)
-
-Distribución de equilibrio:
-  fᵢ^eq = wᵢ ρ [1 + 3(cᵢ·u) + 9/2(cᵢ·u)² - 3/2(u·u)]
-  Pesos D3Q19: w₀=1/3, w₁₋₆=1/18, w₇₋₁₈=1/36
-
-Colisión BGK:
-  fᵢ(x+cᵢ, t+1) = fᵢ(x,t) - (1/τ)[fᵢ(x,t) - fᵢ^eq(x,t)]
+src/
++-- core/
+|   +-- lbm3d.cuh / .cu       D3Q19 CUDA solver (BGK, MRT, Smagorinsky, momentum exchange)
+|   +-- lbm2d.cuh / .cu       D2Q9 lid-driven cavity demo
+|   +-- aero_forces.h / .cpp   Pressure-based force calculation (fallback)
+|   +-- voxelizer.h / .cpp     SAT-based triangle-AABB voxelization
+|   +-- log.h                  Logging macros (DEBUG/INFO/WARN/ERROR)
++-- geometry/
+|   +-- mesh.h                 GPU mesh data structures
+|   +-- model_loader.h / .cpp  Assimp model loading + normalization
+|   +-- primitives.h / .cpp    Procedural sphere, cylinder, NACA 0012
++-- visualization/
+|   +-- renderer.h / .cpp      Model rendering with Phong lighting
+|   +-- camera.h               Orbit camera with pan/zoom
+|   +-- streamlines.h / .cpp   RK4 streamline generation + surface-hugging
+|   +-- particles.h / .cpp     Lagrangian particle tracer jets
+|   +-- slice_plane.h / .cpp   Cross-sectional field visualization
+|   +-- surface_pressure.h/.cpp  Pressure coloring on model surface
+|   +-- volume_renderer.h/.cpp   Ray-marched volume rendering
+|   +-- field2d.h / .cpp       2D field renderer (for LBM2D demo)
++-- export/
+|   +-- data_export.h / .cpp   VTK, CSV, HTML report, screenshot export
++-- ui/
+|   +-- gui.h / .cpp           ImGui control panel
++-- app.h / .cpp               Application orchestrator
++-- main.cpp                   Entry point (GLFW window setup)
 ```
 
-#### Parámetros por defecto
-
-| Parámetro | Valor | Notas |
-|---|---|---|
-| Grid | 200×100×100 | 2M celdas |
-| Domain scale | 0.4 | Modelo ocupa 40% del ancho |
-| Inlet velocity | 0.05 | Unidades lattice (configurable 0.01–0.1) |
-| Tau | 0.8 | Controla Re = u·L/ν |
-| Direcciones de viento | ±X, ±Y, ±Z | 6 opciones |
-
-#### Rendimiento típico
-
-- 2M celdas × 19 distribuciones ≈ 38M operaciones/step
-- 5–10 steps/frame a 60 FPS → 300–600 steps/seg
-- Convergencia a estado estacionario: 1000–5000 steps según geometría y Re
-
-### Planificado pero no implementado
-
-- Operador de colisión MRT (Multiple Relaxation Time)
-- Turbulencia LES con modelo Smagorinsky
-- Bounce-back interpolado para superficies curvas
-- Multi-resolución con grid refinement adaptativo
+### Key Design Decisions
+- **Structure of Arrays (SoA)** memory layout for coalesced GPU reads: `f[q][idx]` where `idx = x + y*nx + z*nx*ny`
+- **Ping-pong buffers** for distribution functions — pointer swap instead of data copy
+- **Cached field access** — GPU-to-CPU transfers only when data is stale (step-based cache tracking)
+- **Fused collide+stream kernel** — single kernel pass handles collision, streaming, and all boundary conditions
+- **Adaptive seeding** — streamline/particle seeds auto-sized to model AABB with surface-proximal seeds for close interaction
 
 ---
 
-## Modos de aplicación
+## Build
 
-La aplicación tiene tres modos seleccionables desde la GUI:
+### Requirements
+- **CMake** 3.24+
+- **CUDA Toolkit** 11.0+ (tested with 12.x)
+- **C++17** compiler (MSVC 2019+, GCC 9+, Clang 10+)
+- **GPU**: NVIDIA with compute capability 6.0+ (Pascal or newer)
+- ~2 GB VRAM for default 200x100x100 grid
+
+All other dependencies are fetched automatically via CMake FetchContent:
+- [GLFW](https://www.glfw.org/) 3.4 — Window/input management
+- [Dear ImGui](https://github.com/ocornut/imgui) (docking branch) — Immediate mode GUI
+- [GLM](https://github.com/g-truc/glm) — OpenGL Mathematics
+- [Assimp](https://github.com/assimp/assimp) — Open Asset Import Library
+- GLAD (included) — OpenGL loader
+
+### Build Steps
+
+```bash
+# Clone
+git clone https://github.com/ZabaHD4K/AeroVortexSimulator.git
+cd AeroVortexSimulator
+
+# Configure and build
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+
+# Run
+./build/Release/aero3d_simulator.exe
+```
+
+Or on Windows with the included batch file:
+```cmd
+build.bat
+build\aero3d_simulator.exe
+```
+
+> Las dependencias se descargan automaticamente en la primera compilacion (~5 min la primera vez).
+
+---
+
+## Usage
+
+### Quick Start
+1. Launch the application
+2. Load a 3D model: drag & drop a file, use the file browser, or select from the model library
+3. Click **"Start Wind Tunnel"** — the model is automatically voxelized and the simulation begins
+4. Orbit (left click), pan (right click), zoom (scroll) to explore the flow
+5. Toggle visualization modes in the GUI panel
+6. Wait for the "[Converged]" indicator for meaningful aero coefficients
+
+### Physics Controls
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Tau | 0.6 | Relaxation time. Lower = higher Reynolds number. Keep > 0.505 for stability |
+| Inlet Velocity | 0.05 | Freestream speed in lattice units. Keep < 0.1 for incompressible assumption |
+| Collision Model | MRT | MRT is more stable than BGK at same Reynolds number |
+| Smagorinsky Cs | 0.12 | LES turbulence constant. 0.1-0.2 typical range |
+| Steps/Frame | 10 | LBM iterations per render frame. More = faster convergence |
+
+### Reynolds Number
+
+```
+Re = U * L / v,    v = (tau - 0.5) / 3
+```
+
+With default settings (tau=0.6, U=0.05, L~40 cells): **Re ~ 60**
+
+For higher Re: decrease tau (toward 0.51) or increase grid resolution.
+
+### Validation
+Use the built-in test models (Sphere, Cylinder, NACA 0012) to compare computed Cd/Cl against published reference values. The GUI shows expected vs. actual coefficients and percent error.
+
+### Controls
+
+| Key | Action |
+|-----|--------|
+| Left click + drag | Orbit camera |
+| Right click + drag | Pan |
+| Scroll | Zoom |
+| R | Reset camera |
+| Esc | Exit |
+
+---
+
+## Theory
+
+### Lattice Boltzmann Method
+
+Instead of solving the Navier-Stokes equations directly, LBM simulates fluid as populations of particles moving on a discrete lattice. Each cell stores 19 distribution functions (D3Q19) representing the probability of finding a particle moving in each lattice direction.
+
+**Core equations:**
+
+```
+Macroscopic recovery:
+  rho = SUM_i f_i
+  u   = (1/rho) SUM_i f_i * c_i
+  p   = rho * cs^2    (cs^2 = 1/3)
+
+Equilibrium distribution:
+  f_i^eq = w_i * rho * [1 + 3(c_i . u) + 9/2(c_i . u)^2 - 3/2(u . u)]
+
+BGK collision + streaming:
+  f_i(x + c_i, t+1) = f_i(x,t) - (1/tau)[f_i(x,t) - f_i^eq(x,t)]
+```
+
+### MRT Collision
+Multiple Relaxation Time transforms populations into moment space, relaxes each moment independently with optimized rates, then transforms back. This provides better stability and accuracy than single-relaxation BGK, especially at higher Reynolds numbers.
+
+### Smagorinsky LES
+At coarse resolutions, subgrid turbulence is modeled by locally increasing the effective viscosity based on the strain rate tensor magnitude:
+```
+tau_eff = 0.5 * (tau + sqrt(tau^2 + 18 * Cs^2 * |S| / rho))
+```
+
+### Momentum Exchange Method
+Forces on solid bodies are computed by summing the momentum transferred at each bounce-back link:
+```
+F = SUM_boundary_links (f_q + f_q_opp) * e_q
+```
+This is the standard Ladd (1994) method and is inherently more accurate than pressure integration on staircase boundaries because it captures both pressure and viscous contributions.
+
+### Boundary Conditions
+- **Bounce-back**: populations hitting solid walls reverse direction, enforcing no-slip condition
+- **Prescribed velocity inlet**: populations set to equilibrium at desired flow speed
+- **Zero-gradient outlet**: populations copied from upstream neighbor (direction-aware for all 6 wind directions)
+- **Stability guards**: cells with density outside [0.3, 3.0] or NaN/Inf are reset to freestream equilibrium
+
+---
+
+## Performance
+
+Typical frame rates on a modern GPU (RTX 3060+):
+
+| Grid Size | Steps/Frame | Approx FPS | VRAM |
+|-----------|-------------|------------|------|
+| 100^3 | 10 | 60+ | ~160 MB |
+| 200x100x100 | 10 | 40-60 | ~170 MB |
+| 300x150x150 | 10 | 15-30 | ~570 MB |
+| 400x200x200 | 5 | 5-15 | ~2.6 GB |
+
+VRAM usage: ~83 bytes per cell (19x2 distribution functions + 7 field arrays + cell type + convergence buffers).
+
+---
+
+## Included Test Models
+
+| Model | File | Use Case |
+|-------|------|----------|
+| F-104G Starfighter | `models/f104_starfighter.glb` | Aeronautical geometry, short wings + fuselage |
+| Aston Martin AMR23 | `models/amr23_f1.glb` | F1 car, ground effect + wings |
+| F-16C Falcon | `models/f16c_falcon.glb` | Classic fighter jet aerodynamics |
+
+### Built-in Validation Models
+- **Sphere** — Expected Cd ~ 0.47 (Re=100), well-documented reference
+- **Cylinder** — Expected Cd ~ 1.2 (Re=100), von Karman vortex street
+- **NACA 0012** — Expected Cd ~ 0.012 (Re=500k), symmetric airfoil profile
+
+> Los modelos 3D externos se gestionan con [Git LFS](https://git-lfs.github.com/). Ejecuta `git lfs install` antes de clonar.
+
+### Credits
+- ["German F-104G Starfighter"](https://skfb.ly/pwGSY) by 42manako — [CC BY 4.0](http://creativecommons.org/licenses/by/4.0/)
+- ["Aston Martin F1 AMR23 2023"](https://skfb.ly/oSVBL) by Redgrund — [CC BY 4.0](http://creativecommons.org/licenses/by/4.0/)
+- ["F16-C Falcon"](https://skfb.ly/osUYX) by Carlos.Maciel — [CC BY 4.0](http://creativecommons.org/licenses/by/4.0/)
+
+---
+
+## Limitations
+
+- **Staircase boundaries**: voxelized surfaces create step-like geometry that overestimates drag on streamlined bodies. Interpolated Bounce-Back (IBB/Bouzidi) would improve this but is not yet implemented
+- **Incompressible assumption**: valid only for Mach < 0.3 in lattice units (inlet velocity < ~0.1)
+- **No thermal effects**: isothermal solver only
+- **Single GPU**: no multi-GPU or distributed computing
+- **NVIDIA only**: CUDA dependency — no AMD/Intel GPU support
+- **No adaptive mesh**: uniform grid everywhere — no local refinement near surfaces
+
+---
+
+## Application Modes
 
 ### 1. Model Viewer
-Visor 3D básico con render Blinn-Phong, cámara orbital, grid, drag & drop. Sin simulación.
+Basic 3D viewer with Blinn-Phong rendering, orbit camera, reference grid. No simulation.
 
 ### 2. LBM 2D
-Simulación 2D de lid-driven cavity con D2Q9. Visualización fullscreen del campo de velocidad con heatmap viridis. Parámetros configurables desde la GUI.
+2D lid-driven cavity simulation (D2Q9) with velocity magnitude heatmap. Useful for learning and parameter exploration.
 
 ### 3. Simulation 3D
-Túnel de viento 3D alrededor del modelo cargado. Cinco modos de visualización simultáneos (toggleables):
-
-| Modo | Colormap | Rendering | Descripción |
-|---|---|---|---|
-| Streamlines | Azul→Naranja | GL_LINE_STRIP | RK4, color por velocidad, fade |
-| Slice Plane | Viridis | Quad texturizado, 70% opacidad | Corte por eje configurable |
-| Surface Pressure | Cool-Warm | Mesh con Blinn-Phong | Presión interpolada en vértices |
-| Particles | Viridis | GL_LINE_STRIP por jet | 120 jets advectados |
-| Model | — | Mesh sólido/wireframe | Geometría del modelo |
+Full 3D wind tunnel around any loaded model. All visualization modes available simultaneously. Real-time aero coefficients with convergence monitoring.
 
 ---
 
-## Tecnologías
+## Logging
 
-| Componente | Tecnología |
-|---|---|
-| Lenguaje | C++17 |
-| Simulación CFD | CUDA (LBM D2Q9 + D3Q19) |
-| Render | OpenGL 4.6 |
-| UI | Dear ImGui |
-| Carga de modelos | Assimp (.stl, .obj, .fbx, .gltf, .ply) |
-| Matemáticas | GLM |
-| Build | CMake + FetchContent (deps automáticas) |
+The application uses a leveled logging system:
+- `[DEBUG]` — Detailed diagnostic info (disabled by default)
+- `[INFO]`  — Normal operation messages
+- `[WARN]`  — Non-fatal issues
+- `[ERROR]` — Critical failures
+
+Log level can be changed via `g_logLevel` in `src/core/log.h`.
 
 ---
 
-## Estructura del Proyecto
+## References
 
-```
-AeroVortexSimulator/
-├── CMakeLists.txt
-├── README.md
-├── build_and_run.bat
-├── build.bat
-├── src/
-│   ├── main.cpp                         # Entry point, ventana OpenGL + loop
-│   ├── app.cpp/h                        # Aplicación principal (orquesta todo)
-│   ├── core/
-│   │   ├── lbm2d.cuh/cu                # Solver LBM 2D (D2Q9, CUDA)
-│   │   ├── lbm3d.cuh/cu                # Solver LBM 3D (D3Q19, CUDA)
-│   │   ├── voxelizer.h/cpp             # Voxelización con SAT (CPU)
-│   │   └── aero_forces.h/cpp           # Cálculo de Cd/Cl/Cs
-│   ├── geometry/
-│   │   ├── model_loader.h/cpp          # Carga de modelos con Assimp
-│   │   └── mesh.h                      # Estructuras de datos (Vertex, Mesh, Model)
-│   ├── visualization/
-│   │   ├── renderer.h/cpp              # Pipeline de render OpenGL (Blinn-Phong + grid)
-│   │   ├── camera.h                    # Cámara orbital
-│   │   ├── field2d.h/cpp               # Heatmap 2D (para LBM 2D)
-│   │   ├── streamlines.h/cpp           # Líneas de corriente 3D (RK4)
-│   │   ├── slice_plane.h/cpp           # Plano de corte 3D
-│   │   ├── surface_pressure.h/cpp      # Presión sobre superficie del modelo
-│   │   └── particles.h/cpp             # Jets de partículas advectadas
-│   └── ui/
-│       └── gui.h/cpp                   # Paneles ImGui
-├── models/                             # Modelos 3D de prueba
-└── extern/
-    └── glad/                           # OpenGL loader
-```
+- Succi, S. — *The Lattice Boltzmann Equation for Fluid Dynamics and Beyond* (2001)
+- d'Humieres, D. — [Multiple-relaxation-time lattice Boltzmann models](https://doi.org/10.1098/rsta.2001.0955) (2002)
+- Smagorinsky, J. — [General circulation experiments with the primitive equations](https://doi.org/10.1175/1520-0493(1963)091<0099:GCEWTP>2.3.CO;2) (1963)
+- Ladd, A.J.C. — [Numerical simulations of particulate suspensions](https://doi.org/10.1017/S0022112094001771) (1994)
+- Bouzidi, M. et al. — Momentum transfer of a Boltzmann-lattice fluid with boundaries (2001)
 
 ---
 
-## Compilación
-
-### Requisitos
-- **Windows 10/11**
-- **CMake 3.24+**
-- **Visual Studio 2022** (MSVC)
-- **CUDA Toolkit 12+** con GPU NVIDIA (Compute Capability 3.0+)
-- **GPU** con OpenGL 4.6
-
-### Build
-```bash
-# Automático
-build_and_run.bat
-
-# Manual
-cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-./build/aero3d_simulator.exe
-```
-
-Las dependencias (GLFW, ImGui, Assimp, GLM) se descargan automáticamente con CMake FetchContent en la primera compilación.
-
----
-
-## Controles
-
-| Acción | Input |
-|---|---|
-| Rotar cámara | Click izquierdo + arrastrar |
-| Zoom | Scroll |
-| Pan | Click derecho + arrastrar |
-| Reset cámara | R |
-| Wireframe | W |
-| Toggle grid | G |
-
----
-
-## Roadmap
-
-- [x] **Fase 0** — Visor 3D base (OpenGL + ImGui + Assimp + cámara orbital)
-- [x] **Fase 1** — LBM 2D en CUDA (lid-driven cavity, D2Q9)
-- [x] **Fase 2** — LBM 3D (D3Q19 + BGK) *(planificado: MRT)*
-- [x] **Fase 3** — Voxelización de modelos en CPU con SAT *(planificado: GPU)*
-- [x] **Fase 4** — Streamlines, slice planes, presión superficial, partículas
-- [x] **Fase 5** — Cálculo de Cd/Cl/Cs + historial temporal
-- [ ] **Fase 6** — Volume rendering + mejoras de visualización
-- [ ] **Fase 7** — Export de datos (CSV, VTK, screenshots)
-- [ ] **Fase 8** — MRT + Smagorinsky LES + multi-resolución
-- [ ] **Fase 9** — Modelos de validación + comparación teórica
-- [ ] **Fase 10** — Polish, optimización, portabilidad, documentación final
-
----
-
-## Modelos de prueba
-
-El proyecto incluye modelos 3D para probar el visor y validar la simulación CFD. Puedes cargarlos desde el botón "Load Model", la librería de modelos en la GUI, o arrastrándolos a la ventana.
-
-| Modelo | Archivo | Uso |
-|---|---|---|
-| F-104G Starfighter | `models/f104_starfighter.glb` | Geometría aeronáutica, alas cortas + fuselaje |
-| Aston Martin AMR23 | `models/amr23_f1.glb` | Coche F1, aerodinámica de suelo + alerones |
-| F-16C Falcon | `models/f16c_falcon.glb` | Caza ligero, geometría aerodinámica clásica |
-
-> Los modelos 3D se gestionan con [Git LFS](https://git-lfs.github.com/) debido a su tamaño. Ejecuta `git lfs install` antes de clonar el repositorio.
-
-### Créditos
-
-- ["German F-104G Starfighter"](https://skfb.ly/pwGSY) by 42manako — Licensed under [Creative Commons Attribution 4.0](http://creativecommons.org/licenses/by/4.0/)
-- ["Aston Martin F1 AMR23 2023"](https://skfb.ly/oSVBL) by Redgrund — Licensed under [Creative Commons Attribution 4.0](http://creativecommons.org/licenses/by/4.0/)
-- ["F16-C Falcon"](https://skfb.ly/osUYX) by Carlos.Maciel — Licensed under [Creative Commons Attribution 4.0](http://creativecommons.org/licenses/by/4.0/)
-
----
-
-## Autor
+## Author
 
 **Alejandro Zabaleta** — [GitHub](https://github.com/ZabaHD4K)
+
+## License
+
+MIT

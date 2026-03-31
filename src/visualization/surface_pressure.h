@@ -14,7 +14,7 @@ public:
     // nx,ny,nz: grid dimensions
     // domainScale: same as used in voxelization
     void render(const Model& model, const float* pressure,
-                int nx, int ny, int nz, float domainScale,
+                int nx, int ny, int nz, float voxelSize,
                 const glm::mat4& mvp, const glm::vec3& camPos,
                 float minP, float maxP);
 

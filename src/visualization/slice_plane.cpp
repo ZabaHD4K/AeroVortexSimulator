@@ -101,12 +101,11 @@ static unsigned int compileShaderProgram(const char* vSrc, const char* fSrc) {
 
 // ── Grid-to-world mapping ───────────────────────────
 
-static glm::vec3 gridToWorld(float gx, float gy, float gz, int nx, int ny, int nz) {
-    float maxDim = (float)std::max({nx, ny, nz});
+static glm::vec3 gridToWorld(float gx, float gy, float gz, int nx, int ny, int nz, float voxelSize) {
     return glm::vec3(
-        (gx - nx * 0.5f) / (maxDim * 0.5f),
-        (gy - ny * 0.5f) / (maxDim * 0.5f),
-        (gz - nz * 0.5f) / (maxDim * 0.5f)
+        (gx - nx * 0.5f) * voxelSize,
+        (gy - ny * 0.5f) * voxelSize,
+        (gz - nz * 0.5f) * voxelSize
     );
 }
 
@@ -145,7 +144,8 @@ void SlicePlaneRenderer::render(
     const float* field3D, int nx, int ny, int nz,
     SliceAxis axis, int sliceIndex,
     const glm::mat4& mvp, float minVal, float maxVal,
-    const uint8_t* cellTypes)
+    const uint8_t* cellTypes,
+    float voxelSize)
 {
     if (!field3D) return;
 
@@ -207,26 +207,26 @@ void SlicePlaneRenderer::render(
     switch (axis) {
         case SLICE_X: {
             float sx = (float)sliceIndex;
-            corners[0] = gridToWorld(sx, 0,         0,         nx, ny, nz);
-            corners[1] = gridToWorld(sx, (float)ny,  0,         nx, ny, nz);
-            corners[2] = gridToWorld(sx, (float)ny,  (float)nz, nx, ny, nz);
-            corners[3] = gridToWorld(sx, 0,         (float)nz, nx, ny, nz);
+            corners[0] = gridToWorld(sx, 0,         0,         nx, ny, nz, voxelSize);
+            corners[1] = gridToWorld(sx, (float)ny,  0,         nx, ny, nz, voxelSize);
+            corners[2] = gridToWorld(sx, (float)ny,  (float)nz, nx, ny, nz, voxelSize);
+            corners[3] = gridToWorld(sx, 0,         (float)nz, nx, ny, nz, voxelSize);
             break;
         }
         case SLICE_Y: {
             float sy = (float)sliceIndex;
-            corners[0] = gridToWorld(0,         sy, 0,         nx, ny, nz);
-            corners[1] = gridToWorld((float)nx, sy, 0,         nx, ny, nz);
-            corners[2] = gridToWorld((float)nx, sy, (float)nz, nx, ny, nz);
-            corners[3] = gridToWorld(0,         sy, (float)nz, nx, ny, nz);
+            corners[0] = gridToWorld(0,         sy, 0,         nx, ny, nz, voxelSize);
+            corners[1] = gridToWorld((float)nx, sy, 0,         nx, ny, nz, voxelSize);
+            corners[2] = gridToWorld((float)nx, sy, (float)nz, nx, ny, nz, voxelSize);
+            corners[3] = gridToWorld(0,         sy, (float)nz, nx, ny, nz, voxelSize);
             break;
         }
         case SLICE_Z: {
             float sz = (float)sliceIndex;
-            corners[0] = gridToWorld(0,         0,         sz, nx, ny, nz);
-            corners[1] = gridToWorld((float)nx, 0,         sz, nx, ny, nz);
-            corners[2] = gridToWorld((float)nx, (float)ny, sz, nx, ny, nz);
-            corners[3] = gridToWorld(0,         (float)ny, sz, nx, ny, nz);
+            corners[0] = gridToWorld(0,         0,         sz, nx, ny, nz, voxelSize);
+            corners[1] = gridToWorld((float)nx, 0,         sz, nx, ny, nz, voxelSize);
+            corners[2] = gridToWorld((float)nx, (float)ny, sz, nx, ny, nz, voxelSize);
+            corners[3] = gridToWorld(0,         (float)ny, sz, nx, ny, nz, voxelSize);
             break;
         }
     }

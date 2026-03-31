@@ -28,6 +28,14 @@ public:
     bool wantsWindStart() const { return windStartRequested; }
     void clearWindStart() { windStartRequested = false; }
 
+    // Test model generation
+    bool wantsTestSphere() const { return testSphereRequested; }
+    void clearTestSphere() { testSphereRequested = false; }
+    bool wantsTestCylinder() const { return testCylinderRequested; }
+    void clearTestCylinder() { testCylinderRequested = false; }
+    bool wantsTestNACA() const { return testNACARequested; }
+    void clearTestNACA() { testNACARequested = false; }
+
     bool wantsWindDirChange() const { return windDirChangeRequested; }
     void clearWindDirChange() { windDirChangeRequested = false; }
 
@@ -39,6 +47,12 @@ public:
 
     bool wantsExportCSV() const { return exportCSVRequested; }
     void clearExportCSV() { exportCSVRequested = false; }
+
+    bool wantsExportReport() const { return exportReportRequested; }
+    void clearExportReport() { exportReportRequested = false; }
+
+    bool wantsExportFlowCSV() const { return exportFlowCSVRequested; }
+    void clearExportFlowCSV() { exportFlowCSVRequested = false; }
 
     void refreshModelLibrary();
 
@@ -53,6 +67,11 @@ private:
     bool screenshotRequested = false;
     bool exportVTKRequested = false;
     bool exportCSVRequested = false;
+    bool exportReportRequested = false;
+    bool exportFlowCSVRequested = false;
+    bool testSphereRequested = false;
+    bool testCylinderRequested = false;
+    bool testNACARequested = false;
     std::string selectedLibraryPath;
 
     std::string modelsDir;

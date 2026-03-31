@@ -56,10 +56,10 @@ enum class CollisionModel : int {
 // ---------------------------------------------------------------------------
 struct LBM3DParams {
     int   nx = 200, ny = 100, nz = 100;
-    float tau           = 0.8f;
+    float tau           = 0.6f;      // Re ~ 67 at default settings, stable vortex shedding
     float inletVelocity = 0.05f;     // lattice units, magnitude
     bool  running       = false;
-    int   stepsPerFrame = 5;
+    int   stepsPerFrame = 10;        // more steps per frame for developed flow
     WindDirection windDir = WIND_POS_X;
 
     // Collision model
@@ -67,7 +67,7 @@ struct LBM3DParams {
 
     // Smagorinsky LES
     bool  useSmagorinsky = true;
-    float smagorinskyCs  = 0.1f;     // Smagorinsky constant
+    float smagorinskyCs  = 0.12f;    // Smagorinsky constant
 };
 
 // ---------------------------------------------------------------------------
@@ -101,12 +101,16 @@ public:
     void setCellTypes(const uint8_t* hostCells);   // upload cell-type grid
     void setCollisionModel(CollisionModel m);
     void setSmagorinsky(bool enable, float Cs = 0.1f);
+    void setWindDirection(WindDirection dir);  // sets outlet upstream offset
 
     // Host-side field access (cached — only downloads when data is stale) -----
     const float* getVelocityMagnitude();           // |u|, nx*ny*nz
     const float* getPressureField();               // rho / 3, nx*ny*nz
     const float* getVorticityMagnitude();           // |curl u|, nx*ny*nz
     void getVelocityComponents(float** ux, float** uy, float** uz);
+
+    // Momentum exchange force on solid body (GPU-accelerated, lattice units)
+    void computeForces(float& fx, float& fy, float& fz);
 
     // Call once per frame before any field access to mark caches stale
     void invalidateCache();
@@ -117,6 +121,10 @@ public:
     float*       getDeviceUz()        { return d_uz; }
     float*       getDeviceRho()       { return d_rho; }
     const uint8_t* getDeviceCellTypes() { return d_cellType; }
+
+    // Convergence detection ----------------------------------------------------
+    float computeRMSChange();
+    bool isConverged(float threshold = 1e-5f) const { return lastRMSChange < threshold; }
 
     // Meta --------------------------------------------------------------------
     int getNx()   const { return nx; }
@@ -139,6 +147,12 @@ private:
     bool  useSmagorinsky = true;
     float smagorinskyCs  = 0.1f;
 
+    // Convergence detection
+    float lastRMSChange = 1.0f;
+
+    // Outlet upstream offset (direction from outlet cell toward interior)
+    int outletDx = -1, outletDy = 0, outletDz = 0; // default: WIND_POS_X
+
     // --- Device arrays -------------------------------------------------------
 
     // Distribution functions: 19 * N floats each, SoA layout
@@ -154,9 +168,15 @@ private:
     float* d_uz  = nullptr;
     float* d_rho = nullptr;
 
+    // Previous velocity buffers (convergence detection)
+    float* d_uxPrev = nullptr;
+    float* d_uyPrev = nullptr;
+    float* d_uzPrev = nullptr;
+
     // Persistent device buffers for derived fields (no malloc/free per call)
-    float* d_velMag = nullptr;
-    float* d_vort   = nullptr;
+    float* d_velMag   = nullptr;
+    float* d_vort     = nullptr;
+    float* d_forceBuf = nullptr;  // 3 floats for momentum exchange force
 
     // --- Host staging buffers ------------------------------------------------
     float* h_velMag   = nullptr;

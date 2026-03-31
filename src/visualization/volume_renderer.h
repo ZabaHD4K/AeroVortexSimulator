@@ -9,7 +9,7 @@ public:
     void shutdown();
 
     // Upload a 3D scalar field as a GL_TEXTURE_3D
-    void uploadField(const float* data, int nx, int ny, int nz);
+    void uploadField(const float* data, int nx, int ny, int nz, float voxelSize = 0.01f);
 
     // Render the volume via front-face ray marching of a proxy cube
     void render(const glm::mat4& view, const glm::mat4& proj,
